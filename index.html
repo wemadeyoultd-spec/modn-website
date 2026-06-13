@@ -1,0 +1,1096 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MODN | We Pave The Way For Your Success</title>
+<meta name="description" content="MODN is a venture-certified company dedicated to innovation, growth, and global partnership.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%23060608'/%3E%3Ctext x='50' y='68' font-size='58' font-family='Arial' font-weight='700' fill='%239b5cff' text-anchor='middle'%3EM%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#060608;
+    --bg-soft:#0d0d14;
+    --surface:rgba(255,255,255,.03);
+    --surface-strong:rgba(255,255,255,.05);
+    --border:rgba(255,255,255,.09);
+    --purple:#9b5cff;
+    --purple-light:#c4a3ff;
+    --purple-dark:#6d28d9;
+    --text:#f4f3f8;
+    --text-muted:#9a98ad;
+    --font-head:'Space Grotesk',sans-serif;
+    --font-body:'Inter',sans-serif;
+  }
+
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    font-family:var(--font-body);
+    background:var(--bg);
+    color:var(--text);
+    overflow-x:hidden;
+    line-height:1.6;
+  }
+  img{max-width:100%;display:block;}
+
+  #particle-canvas{
+    position:fixed;
+    inset:0;
+    width:100%;
+    height:100%;
+    z-index:-2;
+  }
+
+  .container{
+    max-width:1240px;
+    margin:0 auto;
+    padding:0 32px;
+  }
+
+  /* ===== Navbar ===== */
+  .navbar{
+    position:fixed;
+    top:0;left:0;right:0;
+    z-index:200;
+    padding:28px 0;
+    transition:background .4s ease,padding .4s ease,border-color .4s ease;
+    border-bottom:1px solid transparent;
+  }
+  .navbar.scrolled{
+    background:rgba(6,6,8,.75);
+    backdrop-filter:blur(14px);
+    padding:16px 0;
+    border-bottom-color:var(--border);
+  }
+  .nav-inner{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:40px;
+  }
+  .logo{
+    font-family:var(--font-head);
+    font-size:1.5rem;
+    font-weight:700;
+    letter-spacing:.12em;
+    color:var(--text);
+    text-decoration:none;
+    flex-shrink:0;
+  }
+  .logo span{color:var(--purple-light);}
+  .nav-links{
+    display:flex;
+    align-items:center;
+    gap:3.5rem;
+    margin:0 auto;
+  }
+  .nav-links a{
+    position:relative;
+    color:var(--text);
+    text-decoration:none;
+    font-size:.8rem;
+    font-weight:500;
+    letter-spacing:.2em;
+    text-transform:uppercase;
+    padding-bottom:6px;
+    transition:color .3s ease;
+  }
+  .nav-links a::after{
+    content:'';
+    position:absolute;
+    left:0;bottom:0;
+    width:0;height:1px;
+    background:var(--purple-light);
+    transition:width .35s ease;
+  }
+  .nav-links a:hover{color:var(--purple-light);}
+  .nav-links a:hover::after{width:100%;}
+  .nav-cta{
+    flex-shrink:0;
+    border:1px solid var(--border);
+    color:var(--text);
+    text-decoration:none;
+    font-size:.75rem;
+    letter-spacing:.2em;
+    text-transform:uppercase;
+    padding:12px 26px;
+    border-radius:999px;
+    transition:all .3s ease;
+  }
+  .nav-cta:hover{
+    border-color:var(--purple);
+    color:var(--purple-light);
+    box-shadow:0 0 24px rgba(155,92,255,.25);
+  }
+  .nav-toggle{
+    display:none;
+    flex-direction:column;
+    justify-content:center;
+    gap:5px;
+    width:32px;height:32px;
+    background:none;
+    border:none;
+    cursor:pointer;
+    flex-shrink:0;
+  }
+  .nav-toggle span{
+    display:block;
+    width:100%;height:2px;
+    background:var(--text);
+    transition:all .3s ease;
+  }
+  .nav-toggle.active span:nth-child(1){transform:translateY(7px) rotate(45deg);}
+  .nav-toggle.active span:nth-child(2){opacity:0;}
+  .nav-toggle.active span:nth-child(3){transform:translateY(-7px) rotate(-45deg);}
+
+  /* ===== Hero ===== */
+  .hero{
+    position:relative;
+    height:100vh;
+    min-height:640px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    overflow:hidden;
+  }
+  .hero-video-wrap{
+    position:absolute;
+    inset:0;
+    overflow:hidden;
+    pointer-events:none;
+  }
+  .hero-video-wrap iframe{
+    position:absolute;
+    top:50%;left:50%;
+    width:100vw;height:56.25vw;
+    min-height:100vh;min-width:177.78vh;
+    transform:translate(-50%,-50%);
+  }
+  .hero-overlay{
+    position:absolute;
+    inset:0;
+    background:
+      radial-gradient(ellipse at center, rgba(20,8,40,.35) 0%, rgba(6,6,8,.6) 60%, var(--bg) 100%),
+      linear-gradient(180deg, rgba(6,6,8,.5) 0%, rgba(6,6,8,.35) 40%, var(--bg) 100%);
+  }
+  .hero-content{
+    position:relative;
+    z-index:2;
+    text-align:center;
+    max-width:880px;
+    padding:0 24px;
+  }
+  .hero-eyebrow{
+    display:inline-block;
+    font-size:.8rem;
+    letter-spacing:.3em;
+    text-transform:uppercase;
+    color:var(--purple-light);
+    margin-bottom:24px;
+    opacity:0;
+    animation:fadeUp 1s ease .2s forwards;
+  }
+  .hero-title{
+    font-family:var(--font-head);
+    font-weight:700;
+    font-size:clamp(2.4rem,6vw,5rem);
+    line-height:1.15;
+    letter-spacing:-.01em;
+    margin-bottom:24px;
+    opacity:0;
+    animation:fadeUp 1s ease .4s forwards;
+  }
+  .hero-title .grad{
+    background:linear-gradient(135deg,var(--purple-light),var(--purple));
+    -webkit-background-clip:text;
+    background-clip:text;
+    color:transparent;
+  }
+  .hero-subtitle{
+    font-size:1.05rem;
+    color:var(--text-muted);
+    max-width:560px;
+    margin:0 auto 40px;
+    opacity:0;
+    animation:fadeUp 1s ease .6s forwards;
+  }
+  .hero-buttons{
+    display:flex;
+    gap:18px;
+    justify-content:center;
+    flex-wrap:wrap;
+    opacity:0;
+    animation:fadeUp 1s ease .8s forwards;
+  }
+  @keyframes fadeUp{
+    from{opacity:0;transform:translateY(24px);}
+    to{opacity:1;transform:translateY(0);}
+  }
+  .scroll-cue{
+    position:absolute;
+    bottom:36px;left:50%;
+    transform:translateX(-50%);
+    display:flex;flex-direction:column;align-items:center;gap:10px;
+    font-size:.7rem;letter-spacing:.3em;text-transform:uppercase;
+    color:var(--text-muted);
+    z-index:2;
+  }
+  .scroll-cue span{
+    width:1px;height:40px;
+    background:linear-gradient(180deg,var(--purple-light),transparent);
+    animation:scrollLine 2s ease-in-out infinite;
+  }
+  @keyframes scrollLine{
+    0%,100%{transform:scaleY(.4);opacity:.4;}
+    50%{transform:scaleY(1);opacity:1;}
+  }
+
+  /* ===== Buttons ===== */
+  .btn{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    padding:15px 34px;
+    border-radius:999px;
+    font-size:.85rem;
+    font-weight:600;
+    letter-spacing:.1em;
+    text-transform:uppercase;
+    text-decoration:none;
+    border:1px solid transparent;
+    cursor:pointer;
+    transition:all .35s ease;
+  }
+  .btn-primary{
+    background:linear-gradient(135deg,var(--purple),var(--purple-dark));
+    color:#fff;
+    box-shadow:0 10px 30px rgba(155,92,255,.3);
+  }
+  .btn-primary:hover{
+    transform:translateY(-3px);
+    box-shadow:0 14px 36px rgba(155,92,255,.5);
+  }
+  .btn-outline{
+    border-color:var(--border);
+    color:var(--text);
+    background:rgba(255,255,255,.02);
+  }
+  .btn-outline:hover{
+    border-color:var(--purple);
+    color:var(--purple-light);
+    transform:translateY(-3px);
+  }
+
+  /* ===== Ticker ===== */
+  .ticker{
+    position:relative;
+    overflow:hidden;
+    border-top:1px solid var(--border);
+    border-bottom:1px solid var(--border);
+    background:linear-gradient(90deg,rgba(155,92,255,.05),rgba(109,40,217,.05));
+    padding:20px 0;
+  }
+  .ticker-track{
+    display:flex;
+    width:max-content;
+    animation:tickerScroll 38s linear infinite;
+  }
+  .ticker-group{
+    display:flex;
+    align-items:center;
+    flex-shrink:0;
+  }
+  .ticker-group span{
+    display:inline-flex;
+    align-items:center;
+    gap:24px;
+    font-family:var(--font-head);
+    font-size:1.05rem;
+    font-weight:600;
+    letter-spacing:.15em;
+    text-transform:uppercase;
+    color:var(--text-muted);
+    padding:0 28px;
+    white-space:nowrap;
+  }
+  .ticker-group span b{
+    color:var(--purple-light);
+    font-weight:600;
+  }
+  .ticker-group span::after{
+    content:'\2726';
+    color:var(--purple);
+    font-size:.85rem;
+  }
+  @keyframes tickerScroll{
+    from{transform:translateX(0);}
+    to{transform:translateX(-50%);}
+  }
+
+  /* ===== Sections ===== */
+  .section{
+    position:relative;
+    padding:130px 0;
+  }
+  .section-alt{
+    background:rgba(255,255,255,.015);
+    border-top:1px solid var(--border);
+    border-bottom:1px solid var(--border);
+  }
+  .section-label{
+    font-size:.8rem;
+    letter-spacing:.3em;
+    text-transform:uppercase;
+    color:var(--purple-light);
+    margin-bottom:16px;
+  }
+  .section-title{
+    font-family:var(--font-head);
+    font-weight:700;
+    font-size:clamp(1.9rem,4vw,2.9rem);
+    line-height:1.25;
+    margin-bottom:24px;
+  }
+  .section-text{
+    color:var(--text-muted);
+    font-size:1rem;
+    max-width:560px;
+    margin-bottom:18px;
+  }
+  .section-header{
+    max-width:680px;
+    margin:0 auto 70px;
+    text-align:center;
+  }
+  .section-header .section-text{margin:0 auto;}
+
+  /* fade-in on scroll */
+  .fade-in{
+    opacity:0;
+    transform:translateY(40px);
+    transition:opacity .9s ease,transform .9s ease;
+  }
+  .fade-in.visible{
+    opacity:1;
+    transform:translateY(0);
+  }
+
+  /* ===== About ===== */
+  .about-grid{
+    display:grid;
+    grid-template-columns:1.15fr .85fr;
+    gap:80px;
+    align-items:center;
+  }
+  .info-list{
+    list-style:none;
+    margin-top:32px;
+    border-top:1px solid var(--border);
+  }
+  .info-list li{
+    display:flex;
+    justify-content:space-between;
+    gap:24px;
+    padding:18px 0;
+    border-bottom:1px solid var(--border);
+    flex-wrap:wrap;
+  }
+  .info-list li span{
+    font-size:.78rem;
+    letter-spacing:.2em;
+    text-transform:uppercase;
+    color:var(--text-muted);
+  }
+  .info-list li strong{
+    font-family:var(--font-head);
+    font-weight:600;
+    font-size:.95rem;
+    letter-spacing:.03em;
+  }
+
+  .badge-wrap{display:flex;justify-content:center;}
+  .venture-badge{
+    position:relative;
+    width:240px;height:240px;
+  }
+  .venture-badge-ring{
+    position:absolute;inset:0;
+    border-radius:50%;
+    background:conic-gradient(from 0deg,var(--purple),transparent 35%,var(--purple-light) 60%,transparent 90%,var(--purple));
+    animation:spin 10s linear infinite;
+  }
+  .venture-badge-ring::before{
+    content:'';
+    position:absolute;inset:3px;
+    border-radius:50%;
+    background:var(--bg-soft);
+  }
+  .venture-badge-inner{
+    position:absolute;inset:16px;
+    border-radius:50%;
+    background:var(--bg-soft);
+    border:1px solid var(--border);
+    display:flex;flex-direction:column;
+    align-items:center;justify-content:center;
+    gap:10px;text-align:center;
+  }
+  .venture-badge-check{
+    width:46px;height:46px;
+    border-radius:50%;
+    background:linear-gradient(135deg,var(--purple),var(--purple-dark));
+    display:flex;align-items:center;justify-content:center;
+    font-size:1.4rem;color:#fff;font-weight:700;
+    box-shadow:0 0 24px rgba(155,92,255,.5);
+  }
+  .venture-badge-title{
+    font-family:var(--font-head);
+    font-weight:700;
+    font-size:1.15rem;
+    letter-spacing:.06em;
+    line-height:1.35;
+  }
+  .venture-badge-sub{
+    font-size:.7rem;
+    letter-spacing:.25em;
+    text-transform:uppercase;
+    color:var(--text-muted);
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  /* ===== Business ===== */
+  .business-grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(250px,1fr));
+    gap:28px;
+  }
+  .business-card{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:18px;
+    padding:42px 32px;
+    transition:transform .4s ease,border-color .4s ease,background .4s ease;
+  }
+  .business-card:hover{
+    transform:translateY(-8px);
+    border-color:rgba(155,92,255,.4);
+    background:var(--surface-strong);
+    box-shadow:0 20px 50px rgba(0,0,0,.4);
+  }
+  .business-number{
+    font-family:var(--font-head);
+    font-size:.85rem;
+    letter-spacing:.2em;
+    color:var(--purple-light);
+    margin-bottom:24px;
+  }
+  .business-card h3{
+    font-family:var(--font-head);
+    font-size:1.25rem;
+    font-weight:600;
+    margin-bottom:14px;
+    letter-spacing:.01em;
+  }
+  .business-card p{
+    color:var(--text-muted);
+    font-size:.92rem;
+  }
+
+  /* ===== Global ===== */
+  .global-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:80px;
+    align-items:center;
+  }
+  .globe-wrap{display:flex;justify-content:center;}
+  .globe{
+    position:relative;
+    width:320px;height:320px;
+  }
+  .globe-core{
+    position:absolute;inset:32%;
+    border-radius:50%;
+    background:radial-gradient(circle at 32% 30%,var(--purple-light),var(--purple) 55%,var(--purple-dark) 100%);
+    box-shadow:0 0 70px rgba(155,92,255,.55);
+  }
+  .globe-orbit{
+    position:absolute;
+    border:1px solid var(--border);
+    border-radius:50%;
+    animation:spin linear infinite;
+  }
+  .orbit1{inset:0;animation-duration:22s;}
+  .orbit2{inset:9%;animation-duration:30s;animation-direction:reverse;}
+  .orbit3{inset:-9%;animation-duration:40s;}
+  .globe-dot{
+    position:absolute;
+    top:-5px;left:50%;
+    width:10px;height:10px;
+    border-radius:50%;
+    background:var(--purple-light);
+    box-shadow:0 0 14px var(--purple-light);
+    transform:translateX(-50%);
+  }
+  .globe-label{
+    position:absolute;
+    font-size:.7rem;
+    letter-spacing:.2em;
+    text-transform:uppercase;
+    color:var(--text-muted);
+    white-space:nowrap;
+  }
+  .gl-asia{top:-6%;right:-18%;}
+  .gl-americas{bottom:6%;left:-26%;}
+  .gl-europe{top:14%;left:-24%;}
+  .gl-mea{bottom:-4%;right:-20%;}
+
+  /* ===== Contact ===== */
+  .contact-grid{
+    display:grid;
+    grid-template-columns:1fr 1.1fr;
+    gap:80px;
+  }
+  .contact-info{
+    list-style:none;
+    margin-top:32px;
+    display:flex;flex-direction:column;gap:22px;
+  }
+  .contact-info li{
+    display:flex;
+    gap:18px;
+    align-items:flex-start;
+  }
+  .contact-icon{
+    flex-shrink:0;
+    width:42px;height:42px;
+    border-radius:12px;
+    border:1px solid var(--border);
+    background:var(--surface);
+    display:flex;align-items:center;justify-content:center;
+    color:var(--purple-light);
+    font-size:1.1rem;
+  }
+  .contact-info li div p:first-child{
+    font-size:.75rem;
+    letter-spacing:.2em;
+    text-transform:uppercase;
+    color:var(--text-muted);
+    margin-bottom:4px;
+  }
+  .contact-info li div p:last-child{
+    font-family:var(--font-head);
+    font-weight:500;
+    font-size:.98rem;
+  }
+
+  .contact-form{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:20px;
+    padding:44px;
+  }
+  .form-row{display:grid;grid-template-columns:1fr 1fr;gap:20px;}
+  .form-group{display:flex;flex-direction:column;gap:8px;margin-bottom:22px;}
+  .form-group label{
+    font-size:.75rem;
+    letter-spacing:.2em;
+    text-transform:uppercase;
+    color:var(--text-muted);
+  }
+  .form-group input,.form-group textarea{
+    background:rgba(255,255,255,.03);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:14px 16px;
+    color:var(--text);
+    font-family:var(--font-body);
+    font-size:.95rem;
+    resize:vertical;
+    transition:border-color .3s ease,background .3s ease;
+  }
+  .form-group input:focus,.form-group textarea:focus{
+    outline:none;
+    border-color:var(--purple);
+    background:rgba(155,92,255,.07);
+  }
+  .contact-form .btn{width:100%;border:none;}
+  .form-note{
+    margin-top:18px;
+    font-size:.88rem;
+    color:var(--purple-light);
+    text-align:center;
+    opacity:0;
+    transition:opacity .4s ease;
+  }
+  .form-note.show{opacity:1;}
+  .form-note.error{color:#ff8a8a;}
+
+  /* ===== Footer ===== */
+  .footer{
+    border-top:1px solid var(--border);
+    padding:80px 0 0;
+  }
+  .footer-grid{
+    display:grid;
+    grid-template-columns:1.4fr 1fr 1fr;
+    gap:60px;
+    padding-bottom:60px;
+  }
+  .footer-grid p{color:var(--text-muted);font-size:.92rem;margin-top:16px;max-width:320px;}
+  .footer-grid h4{
+    font-family:var(--font-head);
+    font-size:.78rem;
+    letter-spacing:.25em;
+    text-transform:uppercase;
+    color:var(--text-muted);
+    margin-bottom:24px;
+  }
+  .footer-grid .links{display:flex;flex-direction:column;gap:14px;}
+  .footer-grid a{
+    color:var(--text);
+    text-decoration:none;
+    font-size:.95rem;
+    transition:color .3s ease;
+  }
+  .footer-grid a:hover{color:var(--purple-light);}
+  .footer-contact{display:flex;flex-direction:column;gap:14px;font-size:.92rem;color:var(--text-muted);}
+  .footer-contact strong{color:var(--text);font-weight:500;}
+
+  .venture-badge-sm{
+    display:inline-flex;align-items:center;gap:10px;
+    margin-top:22px;padding:9px 18px;
+    border:1px solid var(--border);
+    border-radius:999px;
+    font-size:.72rem;letter-spacing:.2em;text-transform:uppercase;
+    color:var(--purple-light);
+  }
+  .venture-badge-sm::before{
+    content:'\2713';
+    display:inline-flex;width:18px;height:18px;
+    border-radius:50%;background:var(--purple);color:#fff;
+    align-items:center;justify-content:center;font-size:.65rem;
+  }
+
+  .footer-bottom{
+    border-top:1px solid var(--border);
+    padding:26px 0;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    flex-wrap:wrap;
+    gap:12px;
+    font-size:.8rem;
+    color:var(--text-muted);
+    letter-spacing:.05em;
+  }
+
+  /* ===== Responsive ===== */
+  @media (max-width:980px){
+    .about-grid,.global-grid,.contact-grid{grid-template-columns:1fr;gap:60px;}
+    .footer-grid{grid-template-columns:1fr 1fr;}
+    .badge-wrap,.globe-wrap{order:-1;}
+  }
+  @media (max-width:840px){
+    .nav-links{
+      position:absolute;
+      top:100%;left:0;right:0;
+      flex-direction:column;
+      align-items:flex-start;
+      gap:0;
+      background:rgba(6,6,8,.96);
+      backdrop-filter:blur(14px);
+      border-bottom:1px solid var(--border);
+      max-height:0;
+      overflow:hidden;
+      transition:max-height .4s ease;
+    }
+    .nav-links.open{max-height:320px;}
+    .nav-links a{
+      width:100%;
+      padding:18px 32px;
+      border-bottom:1px solid var(--border);
+    }
+    .nav-links a::after{display:none;}
+    .nav-cta{display:none;}
+    .nav-toggle{display:flex;}
+  }
+  @media (max-width:640px){
+    .section{padding:90px 0;}
+    .form-row{grid-template-columns:1fr;}
+    .footer-grid{grid-template-columns:1fr;gap:40px;}
+    .contact-form{padding:30px;}
+    .hero-buttons{flex-direction:column;align-items:stretch;}
+  }
+</style>
+</head>
+<body>
+
+<canvas id="particle-canvas"></canvas>
+
+<!-- ===== Navbar ===== -->
+<header class="navbar">
+  <div class="container nav-inner">
+    <a href="#top" class="logo">MOD<span>N</span></a>
+    <nav class="nav-links">
+      <a href="#about">About</a>
+      <a href="#business">Business</a>
+      <a href="#global">Global</a>
+      <a href="#contact">Contact</a>
+    </nav>
+    <a href="#contact" class="nav-cta">Get in Touch</a>
+    <button class="nav-toggle" aria-label="Toggle menu">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+</header>
+
+<!-- ===== Hero ===== -->
+<section id="top" class="hero">
+  <div class="hero-video-wrap">
+    <iframe
+      src="https://www.youtube.com/embed/E8UbKL6Gg3o?autoplay=1&mute=1&loop=1&playlist=E8UbKL6Gg3o&controls=0&showinfo=0&rel=0&iv_load_policy=3&modestbranding=1&playsinline=1"
+      title="MODN background video"
+      frameborder="0"
+      allow="autoplay; encrypted-media; picture-in-picture"
+      allowfullscreen>
+    </iframe>
+  </div>
+  <div class="hero-overlay"></div>
+  <div class="hero-content">
+    <p class="hero-eyebrow">MODN &middot; Venture Certified Company</p>
+    <h1 class="hero-title">We pave the way for <span class="grad">your success.</span></h1>
+    <p class="hero-subtitle">From bold ideas to global impact &mdash; MODN partners with visionaries to build, grow, and scale what comes next.</p>
+    <div class="hero-buttons">
+      <a href="#business" class="btn btn-primary">Explore Our Business</a>
+      <a href="#contact" class="btn btn-outline">Contact Us</a>
+    </div>
+  </div>
+  <div class="scroll-cue"><span></span>Scroll</div>
+</section>
+
+<!-- ===== Ticker ===== -->
+<div class="ticker">
+  <div class="ticker-track">
+    <div class="ticker-group">
+      <span><b>MODN</b> &mdash; We Pave The Way For Your Success</span>
+      <span>Venture Certified</span>
+      <span>Innovation &middot; Growth &middot; Global</span>
+      <span>Incheon, Korea</span>
+    </div>
+    <div class="ticker-group" aria-hidden="true">
+      <span><b>MODN</b> &mdash; We Pave The Way For Your Success</span>
+      <span>Venture Certified</span>
+      <span>Innovation &middot; Growth &middot; Global</span>
+      <span>Incheon, Korea</span>
+    </div>
+  </div>
+</div>
+
+<!-- ===== About ===== -->
+<section id="about" class="section">
+  <div class="container about-grid">
+    <div class="fade-in">
+      <p class="section-label">About Us</p>
+      <h2 class="section-title">Driven by purpose, built for the future</h2>
+      <p class="section-text">Founded with a clear mission, MODN exists to help businesses and individuals move forward with confidence. As a venture-certified company based in Incheon, South Korea, we combine strategic thinking, technology, and hands-on execution to turn ambition into results.</p>
+      <p class="section-text">Our name reflects our philosophy &mdash; to pave the way. We don't just consult or advise; we build alongside our partners, creating the infrastructure, brand, and connections needed for long-term success in an increasingly global market.</p>
+      <ul class="info-list">
+        <li><span>Business Registration No.</span><strong>150-86-01953</strong></li>
+        <li><span>CEO</span><strong>Seungjin Lee</strong></li>
+        <li><span>Email</span><strong>WEMADEYOULTD@GMAIL.COM</strong></li>
+      </ul>
+    </div>
+    <div class="fade-in badge-wrap">
+      <div class="venture-badge">
+        <div class="venture-badge-ring"></div>
+        <div class="venture-badge-inner">
+          <span class="venture-badge-check">&#10003;</span>
+          <span class="venture-badge-title">Venture<br>Certified</span>
+          <span class="venture-badge-sub">Republic of Korea</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== Business ===== -->
+<section id="business" class="section section-alt">
+  <div class="container">
+    <div class="section-header fade-in">
+      <p class="section-label">Our Business</p>
+      <h2 class="section-title">What we focus on</h2>
+      <p class="section-text">MODN operates across multiple disciplines, united by a single goal &mdash; building lasting value for our partners and the markets we serve.</p>
+    </div>
+    <div class="business-grid">
+      <div class="business-card fade-in">
+        <p class="business-number">01</p>
+        <h3>Technology &amp; Platform Development</h3>
+        <p>Designing and building digital platforms and software solutions that solve real-world problems and scale efficiently.</p>
+      </div>
+      <div class="business-card fade-in">
+        <p class="business-number">02</p>
+        <h3>Brand &amp; Content Strategy</h3>
+        <p>Crafting brand identities and content strategies that connect businesses with audiences across digital channels.</p>
+      </div>
+      <div class="business-card fade-in">
+        <p class="business-number">03</p>
+        <h3>Global Trade &amp; Business Development</h3>
+        <p>Building bridges between Korean innovation and international markets through strategic partnerships and trade.</p>
+      </div>
+      <div class="business-card fade-in">
+        <p class="business-number">04</p>
+        <h3>Investment &amp; Incubation</h3>
+        <p>Supporting early-stage ventures with capital, mentorship, and operational expertise to accelerate sustainable growth.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== Global ===== -->
+<section id="global" class="section">
+  <div class="container global-grid">
+    <div class="fade-in">
+      <p class="section-label">Global</p>
+      <h2 class="section-title">Connecting Korea to the world</h2>
+      <p class="section-text">Based in Incheon &mdash; Korea's gateway to the world &mdash; MODN is positioned at the crossroads of East Asia's fastest-growing markets. Our global outlook shapes everything we do, from product design to partnership strategy.</p>
+      <p class="section-text">We actively build relationships across Asia, the Americas, and Europe, helping Korean innovation reach new markets and bringing global best practices home. Wherever the opportunity is, MODN paves the way to get there.</p>
+    </div>
+    <div class="fade-in globe-wrap">
+      <div class="globe">
+        <div class="globe-core"></div>
+        <div class="globe-orbit orbit1"><span class="globe-dot"></span></div>
+        <div class="globe-orbit orbit2"><span class="globe-dot"></span></div>
+        <div class="globe-orbit orbit3"><span class="globe-dot"></span></div>
+        <span class="globe-label gl-asia">Asia</span>
+        <span class="globe-label gl-americas">Americas</span>
+        <span class="globe-label gl-europe">Europe</span>
+        <span class="globe-label gl-mea">Middle East</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== Contact ===== -->
+<section id="contact" class="section section-alt">
+  <div class="container contact-grid">
+    <div class="fade-in">
+      <p class="section-label">Contact</p>
+      <h2 class="section-title">Let's start the conversation</h2>
+      <p class="section-text">Have a project, partnership, or question in mind? We'd love to hear from you. Reach out using the form, or contact us directly &mdash; our team will respond as soon as possible.</p>
+      <ul class="contact-info">
+        <li>
+          <span class="contact-icon">&#9993;</span>
+          <div><p>Email</p><p>WEMADEYOULTD@GMAIL.COM</p></div>
+        </li>
+        <li>
+          <span class="contact-icon">&#128205;</span>
+          <div><p>Address</p><p>806 Bongsu-daero, Seo-gu, Incheon, Korea</p></div>
+        </li>
+        <li>
+          <span class="contact-icon">&#128188;</span>
+          <div><p>Business Registration No.</p><p>150-86-01953</p></div>
+        </li>
+        <li>
+          <span class="contact-icon">&#128100;</span>
+          <div><p>CEO</p><p>Seungjin Lee</p></div>
+        </li>
+      </ul>
+    </div>
+    <form class="fade-in contact-form" id="contact-form" action="https://formspree.io/f/xojzpnle" method="POST">
+      <div class="form-row">
+        <div class="form-group">
+          <label for="name">Name</label>
+          <input type="text" id="name" name="name" required>
+        </div>
+        <div class="form-group">
+          <label for="email">Email</label>
+          <input type="email" id="email" name="email" required>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="subject">Subject</label>
+        <input type="text" id="subject" name="subject" required>
+      </div>
+      <div class="form-group">
+        <label for="message">Message</label>
+        <textarea id="message" name="message" rows="5" required></textarea>
+      </div>
+      <input type="hidden" name="_subject" value="New inquiry from MODN website">
+      <input type="text" name="_gotcha" style="display:none" tabindex="-1" autocomplete="off">
+      <button type="submit" class="btn btn-primary">Send Message</button>
+      <p class="form-note" id="form-note"></p>
+    </form>
+  </div>
+</section>
+
+<!-- ===== Footer ===== -->
+<footer class="footer">
+  <div class="container footer-grid">
+    <div>
+      <a href="#top" class="logo">MOD<span>N</span></a>
+      <p>We pave the way for your success.</p>
+      <div class="venture-badge-sm">Venture Certified</div>
+    </div>
+    <div>
+      <h4>Sitemap</h4>
+      <div class="links">
+        <a href="#about">About</a>
+        <a href="#business">Business</a>
+        <a href="#global">Global</a>
+        <a href="#contact">Contact</a>
+      </div>
+    </div>
+    <div>
+      <h4>Contact</h4>
+      <div class="footer-contact">
+        <span><strong>Email</strong><br>WEMADEYOULTD@GMAIL.COM</span>
+        <span><strong>Address</strong><br>806 Bongsu-daero, Seo-gu, Incheon, Korea</span>
+        <span><strong>Business Reg. No.</strong><br>150-86-01953</span>
+      </div>
+    </div>
+  </div>
+  <div class="footer-bottom container">
+    <p>&copy; 2026 MODN. All rights reserved.</p>
+    <p>CEO Seungjin Lee &middot; Business Registration No. 150-86-01953</p>
+  </div>
+</footer>
+
+<script>
+  // ===== Particle canvas background =====
+  (function(){
+    var canvas = document.getElementById('particle-canvas');
+    var ctx = canvas.getContext('2d');
+    var particles = [];
+
+    function resize(){
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+
+    function createParticles(){
+      var count = Math.floor((canvas.width * canvas.height) / 18000);
+      particles = [];
+      for (var i = 0; i < count; i++){
+        particles.push({
+          x: Math.random() * canvas.width,
+          y: Math.random() * canvas.height,
+          vx: (Math.random() - 0.5) * 0.35,
+          vy: (Math.random() - 0.5) * 0.35,
+          r: Math.random() * 1.8 + 0.6
+        });
+      }
+    }
+
+    function draw(){
+      ctx.fillStyle = '#060608';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      for (var i = 0; i < particles.length; i++){
+        var p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        if (p.x < 0 || p.x > canvas.width) p.vx *= -1;
+        if (p.y < 0 || p.y > canvas.height) p.vy *= -1;
+
+        for (var j = i + 1; j < particles.length; j++){
+          var q = particles[j];
+          var dx = p.x - q.x;
+          var dy = p.y - q.y;
+          var dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < 120){
+            ctx.strokeStyle = 'rgba(155,92,255,' + (0.14 * (1 - dist / 120)) + ')';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+            ctx.lineTo(q.x, q.y);
+            ctx.stroke();
+          }
+        }
+
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(196,163,255,0.65)';
+        ctx.fill();
+      }
+      requestAnimationFrame(draw);
+    }
+
+    window.addEventListener('resize', function(){
+      resize();
+      createParticles();
+    });
+
+    resize();
+    createParticles();
+    draw();
+  })();
+
+  // ===== Navbar scroll state =====
+  var navbar = document.querySelector('.navbar');
+  window.addEventListener('scroll', function(){
+    if (window.scrollY > 40) navbar.classList.add('scrolled');
+    else navbar.classList.remove('scrolled');
+  });
+
+  // ===== Mobile nav toggle =====
+  var navToggle = document.querySelector('.nav-toggle');
+  var navLinks = document.querySelector('.nav-links');
+  navToggle.addEventListener('click', function(){
+    navLinks.classList.toggle('open');
+    navToggle.classList.toggle('active');
+  });
+  navLinks.querySelectorAll('a').forEach(function(a){
+    a.addEventListener('click', function(){
+      navLinks.classList.remove('open');
+      navToggle.classList.remove('active');
+    });
+  });
+
+  // ===== Scroll fade-in =====
+  var faders = document.querySelectorAll('.fade-in');
+  var observer = new IntersectionObserver(function(entries){
+    entries.forEach(function(entry, i){
+      if (entry.isIntersecting){
+        setTimeout(function(){
+          entry.target.classList.add('visible');
+        }, i * 80);
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.15 });
+  faders.forEach(function(el){ observer.observe(el); });
+
+  // ===== Contact form (Formspree) =====
+  var form = document.getElementById('contact-form');
+  var formNote = document.getElementById('form-note');
+  form.addEventListener('submit', function(e){
+    e.preventDefault();
+    var data = new FormData(form);
+    fetch(form.action, {
+      method: 'POST',
+      body: data,
+      headers: { 'Accept': 'application/json' }
+    }).then(function(response){
+      if (response.ok){
+        formNote.textContent = "Thank you for reaching out. We'll get back to you shortly.";
+        formNote.classList.remove('error');
+        formNote.classList.add('show');
+        form.reset();
+      } else {
+        formNote.textContent = 'Something went wrong. Please try again or email us directly.';
+        formNote.classList.add('error');
+        formNote.classList.add('show');
+      }
+    }).catch(function(){
+      formNote.textContent = 'Something went wrong. Please try again or email us directly.';
+      formNote.classList.add('error');
+      formNote.classList.add('show');
+    });
+  });
+</script>
+
+</body>
+</html>

@@ -27,8 +27,8 @@ export default async function seedUsRegion({
     fields: ["id", "name", "currency_code", "countries.iso_2"],
   })
 
-  const hasUs = existing.some((r: { countries?: { iso_2?: string }[] }) =>
-    r.countries?.some((c) => c?.iso_2 === "us")
+  const hasUs = existing.some((r) =>
+    (r.countries ?? []).some((c) => c?.iso_2 === "us")
   )
 
   if (hasUs) {

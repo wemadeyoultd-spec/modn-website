@@ -10,6 +10,7 @@ import {
   createProductsWorkflow,
   deleteProductCategoriesWorkflow,
   deleteProductsWorkflow,
+  linkSalesChannelsToStockLocationWorkflow,
 } from "@medusajs/medusa/core-flows"
 
 /**
@@ -312,7 +313,7 @@ export default async function seedSorinex({
 
   const { data: stockLocations } = await query.graph({
     entity: "stock_location",
-    fields: ["id"],
+    fields: ["id", "sales_channels.id"],
   })
   const stockLocation = stockLocations[0]
   if (!stockLocation) {
@@ -320,6 +321,21 @@ export default async function seedSorinex({
       MedusaError.Types.NOT_FOUND,
       "No stock location found. Run the initial data seed first."
     )
+  }
+
+  // Ensure the stock location is linked to the sales channel the publishable API
+  // key uses. Without this link the Store API reports inventory_quantity = 0 and
+  // the storefront shows every product as "Out of stock". The initial data seed
+  // already creates this link, but re-assert it defensively so a fresh seed is
+  // always correct.
+  const locationLinkedToChannel = (stockLocation.sales_channels ?? []).some(
+    (sc) => sc?.id === defaultSalesChannel.id
+  )
+  if (!locationLinkedToChannel) {
+    await linkSalesChannelsToStockLocationWorkflow(container).run({
+      input: { id: stockLocation.id, add: [defaultSalesChannel.id] },
+    })
+    logger.info("Linked stock location to the Default Sales Channel.")
   }
 
   // 1. Remove the demo catalog and any previous Sorinex seed run (idempotent).
@@ -420,7 +436,7 @@ export default async function seedSorinex({
     .map((item) => ({
       location_id: stockLocation.id,
       inventory_item_id: item.id,
-      stocked_quantity: 25,
+      stocked_quantity: 100,
     }))
 
   if (inventoryLevels.length) {

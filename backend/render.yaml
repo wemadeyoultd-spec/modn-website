@@ -1,0 +1,53 @@
+# Render.com Blueprint (alternative to Railway) for the Medusa backend + Postgres.
+# In Render: New > Blueprint, point it at this repo. Render reads this file.
+# After the first deploy, set the remaining secrets (Stripe, CORS URLs) in the
+# dashboard, then trigger a manual deploy.
+
+databases:
+  - name: modn-postgres
+    databaseName: medusa
+    user: medusa
+    plan: free # upgrade to "basic" or higher for production
+
+services:
+  - type: web
+    name: modn-backend
+    runtime: docker
+    plan: starter
+    region: oregon
+    rootDir: backend
+    dockerfilePath: ./apps/backend/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: modn-postgres
+          property: connectionString
+      - key: DATABASE_SSL
+        value: "true"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: COOKIE_SECRET
+        generateValue: true
+      # Public URL of this backend (fill in after Render assigns the domain).
+      - key: MEDUSA_BACKEND_URL
+        sync: false
+      # CORS — must include the storefront domain(s). Set in the dashboard.
+      - key: STORE_CORS
+        sync: false
+      - key: ADMIN_CORS
+        sync: false
+      - key: AUTH_CORS
+        sync: false
+      # Stripe (optional). Leave unset to boot without payments.
+      - key: STRIPE_API_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      # Redis (optional). Add a Render Key Value / Redis instance and paste URL.
+      # - key: REDIS_URL
+      #   sync: false

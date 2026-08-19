@@ -1,0 +1,14 @@
+# Keep the Docker build context small and reproducible.
+**/node_modules
+**/.medusa
+**/.next
+**/dist
+**/build
+**/.turbo
+**/coverage
+**/.git
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+**/.DS_Store

@@ -274,7 +274,7 @@ jobs:
           upsert NODE_ENV "production"
 
           # Resolve the ACTUAL Postgres connection string at runtime instead of
-          # emitting Railway's ${{ Postgres.DATABASE_URL }} reference literal
+          # emitting Railway's reference literal for Postgres.DATABASE_URL
           # (which cannot be produced safely from a GitHub Actions expression).
           # variablesForServiceDeployment returns the Postgres service's
           # variables with Railway references already resolved to concrete

@@ -449,19 +449,42 @@ jobs:
           RAILWAY_SERVICE_ID: ${{ steps.service.outputs.service_id }}
         run: |
           set -euo pipefail
-          # A workspace/team token in RAILWAY_API_TOKEN can only drive the CLI
-          # once the working directory is linked to a specific project /
-          # environment / service. Link non-interactively by IDs (not names) so
-          # 'railway up' knows exactly where to deploy.
-          echo "Linking Railway project=$RAILWAY_PROJECT_ID env=$RAILWAY_ENVIRONMENT_ID service=$RAILWAY_SERVICE_ID ..."
-          # Current CLI flags: --project/-p, --environment/-e, --service/-s.
-          railway link --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --service "$RAILWAY_SERVICE_ID" \
-            || railway link -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT_ID" -s "$RAILWAY_SERVICE_ID" \
-            || railway link --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID"
+          gql() {
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" --data "$1"
+          }
+          scrub() { sed 's/Bearer [^"]*/Bearer ***/g'; }
+
+          # A workspace/team token (RAILWAY_API_TOKEN) drives GraphQL fine but
+          # the CLI's 'railway link'/'railway up' reject it with "Unauthorized".
+          # The supported CI deploy path is a PROJECT token: mint one scoped to
+          # this project+environment via GraphQL and pass it to the CLI as
+          # RAILWAY_TOKEN. A project token already implies the project and
+          # environment, so no 'railway link' is required.
+          echo "Minting a project token for the CLI deploy..."
+          TOK_BODY="$(jq -n --arg p "$RAILWAY_PROJECT_ID" --arg e "$RAILWAY_ENVIRONMENT_ID" --arg n "ci-deploy-${GITHUB_RUN_ID}" \
+            '{query:"mutation($input: ProjectTokenCreateInput!){ projectTokenCreate(input:$input) }", variables:{input:{name:$n, projectId:$p, environmentId:$e}}}')"
+          TOK_RESP="$(gql "$TOK_BODY")"
+          if echo "$TOK_RESP" | jq -e '.errors' >/dev/null 2>&1; then
+            echo "::error::Failed to mint a Railway project token for CLI deploy."
+            echo "$TOK_RESP" | scrub
+            exit 1
+          fi
+          PROJECT_TOKEN="$(echo "$TOK_RESP" | jq -r '.data.projectTokenCreate // ""')"
+          if [ -z "$PROJECT_TOKEN" ]; then
+            echo "::error::projectTokenCreate returned an empty token."
+            exit 1
+          fi
+          echo "::add-mask::$PROJECT_TOKEN"
+
           echo "Uploading build context and deploying in CI mode..."
           # railway up builds from backend/ using apps/backend/Dockerfile (railway.json).
           # --ci: non-interactive, exits after upload without streaming forever.
-          railway up --ci --service "$RAILWAY_SERVICE_ID"
+          # Use ONLY the project token (unset the team token) so the CLI does not
+          # prefer the workspace token that it rejects.
+          env -u RAILWAY_API_TOKEN RAILWAY_TOKEN="$PROJECT_TOKEN" \
+            railway up --ci --service "$RAILWAY_SERVICE_ID"
 
       # -- Ensure a public domain and capture it -----------------------------
       - name: Ensure backend public domain
@@ -539,8 +562,23 @@ jobs:
           RAILWAY_ENVIRONMENT_ID: ${{ steps.environment.outputs.environment_id }}
         run: |
           set -uo pipefail
+          gql() {
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" --data "$1"
+          }
+          # 'railway run' also rejects the workspace token — mint a project token
+          # (as in the deploy step) and use it as RAILWAY_TOKEN for the CLI.
+          PROJECT_TOKEN=""
+          TOK_BODY="$(jq -n --arg p "$RAILWAY_PROJECT_ID" --arg e "$RAILWAY_ENVIRONMENT_ID" --arg n "ci-pubkey-${GITHUB_RUN_ID}" \
+            '{query:"mutation($input: ProjectTokenCreateInput!){ projectTokenCreate(input:$input) }", variables:{input:{name:$n, projectId:$p, environmentId:$e}}}')"
+          TOK_RESP="$(gql "$TOK_BODY")"
+          if ! echo "$TOK_RESP" | jq -e '.errors' >/dev/null 2>&1; then
+            PROJECT_TOKEN="$(echo "$TOK_RESP" | jq -r '.data.projectTokenCreate // ""')"
+            [ -n "$PROJECT_TOKEN" ] && echo "::add-mask::$PROJECT_TOKEN"
+          fi
           echo "Reading the publishable key from the deployed database..."
-          RAW="$(railway run --service "$RAILWAY_BACKEND_SERVICE" -- npx medusa exec ./src/scripts/print-pubkey.ts 2>/dev/null || true)"
+          RAW="$(env -u RAILWAY_API_TOKEN RAILWAY_TOKEN="$PROJECT_TOKEN" railway run --service "$RAILWAY_BACKEND_SERVICE" -- npx medusa exec ./src/scripts/print-pubkey.ts 2>/dev/null || true)"
           PK="$(echo "$RAW" | grep -oE 'pk_[A-Za-z0-9_]+' | tail -n1)"
           if [ -z "$PK" ]; then
             echo "::warning::Could not read a publishable key (pk_...). If this is the first deploy, ensure RUN_SEED=true created one. Re-run to set it on the storefront."

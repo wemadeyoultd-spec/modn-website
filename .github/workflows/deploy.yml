@@ -1,0 +1,601 @@
+name: Deploy
+
+# Manual-only trigger. This pipeline is idempotent (safe to re-run) and does NOT
+# run on push. Provide the three repository secrets described in DEPLOY-CI.md.
+on:
+  workflow_dispatch:
+    inputs:
+      run_seed:
+        description: "Seed the store DB on this deploy (sets RUN_SEED). Use true only on the FIRST deploy, then false."
+        type: choice
+        options:
+          - "true"
+          - "false"
+        default: "true"
+      deploy_domain:
+        description: "Custom domain to attach (overrides the DEPLOY_DOMAIN repo variable)."
+        required: false
+        default: ""
+
+# One deploy at a time; do not cancel an in-flight deploy.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  RAILWAY_PROJECT_NAME: modn-website
+  RAILWAY_BACKEND_SERVICE: backend
+  RAILWAY_DB_SERVICE: Postgres
+  RAILWAY_GRAPHQL: https://backboard.railway.com/graphql/v2
+  VERCEL_PROJECT_NAME: modn-storefront
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # JOB 1 — Backend + Postgres on Railway
+  # ---------------------------------------------------------------------------
+  deploy-backend:
+    name: Deploy backend (Railway)
+    runs-on: ubuntu-latest
+    outputs:
+      backend_url: ${{ steps.backend_url.outputs.backend_url }}
+      publishable_key: ${{ steps.pubkey.outputs.publishable_key }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Resolve deploy domain
+        id: domain
+        run: |
+          DOMAIN="${{ github.event.inputs.deploy_domain }}"
+          if [ -z "$DOMAIN" ]; then DOMAIN="${{ vars.DEPLOY_DOMAIN }}"; fi
+          if [ -z "$DOMAIN" ]; then DOMAIN="kr.respectathletic.com"; fi
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+          echo "::notice::Deploy domain = $DOMAIN"
+
+      - name: Install Railway CLI
+        run: |
+          npm i -g @railway/cli
+          railway --version
+
+      - name: Verify Railway auth
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "::error::RAILWAY_API_TOKEN secret is not set."
+            exit 1
+          fi
+          echo "Checking Railway account (whoami)..."
+          railway whoami || {
+            echo "::error::railway whoami failed — is RAILWAY_API_TOKEN a valid account/team token?"
+            exit 1
+          }
+
+      # -- Ensure a Railway project named modn-website exists -----------------
+      - name: Ensure Railway project exists
+        id: project
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          gql() {
+            # $1 = JSON body. Never echoes the token.
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "$1"
+          }
+          scrub() { sed 's/Bearer [^"]*/Bearer ***/g'; }
+
+          echo "Querying existing projects..."
+          RESP="$(gql '{"query":"query { me { projects { edges { node { id name } } } } }"}')"
+          if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
+            echo "::error::Railway GraphQL returned errors while listing projects."
+            echo "$RESP" | scrub
+            exit 1
+          fi
+
+          PROJECT_ID="$(echo "$RESP" | jq -r --arg n "$RAILWAY_PROJECT_NAME" \
+            '[.data.me.projects.edges[].node | select(.name==$n) | .id][0] // ""')"
+
+          if [ -n "$PROJECT_ID" ]; then
+            echo "::notice::Found existing project $RAILWAY_PROJECT_NAME ($PROJECT_ID)"
+          else
+            echo "Project not found — creating $RAILWAY_PROJECT_NAME..."
+            BODY="$(jq -n --arg n "$RAILWAY_PROJECT_NAME" \
+              '{query:"mutation projectCreate($input: ProjectCreateInput!){ projectCreate(input:$input){ id name } }", variables:{input:{name:$n}}}')"
+            RESP="$(gql "$BODY")"
+            if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
+              echo "::error::Failed to create Railway project."
+              echo "$RESP" | scrub
+              exit 1
+            fi
+            PROJECT_ID="$(echo "$RESP" | jq -r '.data.projectCreate.id')"
+            echo "::notice::Created project $RAILWAY_PROJECT_NAME ($PROJECT_ID)"
+          fi
+          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+
+      # -- Read environments + services --------------------------------------
+      - name: Read project environment and services
+        id: environment
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          PROJECT_ID: ${{ steps.project.outputs.project_id }}
+        run: |
+          set -euo pipefail
+          gql() {
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" --data "$1"
+          }
+          BODY="$(jq -n --arg id "$PROJECT_ID" \
+            '{query:"query($id: String!){ project(id:$id){ environments { edges { node { id name } } } services { edges { node { id name } } } } }", variables:{id:$id}}')"
+          RESP="$(gql "$BODY")"
+          if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
+            echo "::error::Failed to read project environments/services."
+            echo "$RESP" | sed 's/Bearer [^"]*/Bearer ***/g'
+            exit 1
+          fi
+          echo "$RESP" > project.json
+          ENV_ID="$(jq -r '[.data.project.environments.edges[].node | select(.name=="production") | .id][0] // .data.project.environments.edges[0].node.id // ""' project.json)"
+          echo "environment_id=$ENV_ID" >> "$GITHUB_OUTPUT"
+          echo "::notice::Environment id = $ENV_ID"
+
+      # -- Ensure Postgres service exists ------------------------------------
+      - name: Ensure Postgres service
+        id: postgres
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          PROJECT_ID: ${{ steps.project.outputs.project_id }}
+        run: |
+          set -euo pipefail
+          gql() {
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" --data "$1"
+          }
+          DB_ID="$(jq -r --arg n "$RAILWAY_DB_SERVICE" \
+            '[.data.project.services.edges[].node | select(.name==$n) | .id][0] // ""' project.json)"
+          if [ -n "$DB_ID" ]; then
+            echo "::notice::Postgres service already exists ($DB_ID)"
+          else
+            echo "Creating Postgres service from template image..."
+            BODY="$(jq -n --arg p "$PROJECT_ID" --arg n "$RAILWAY_DB_SERVICE" \
+              '{query:"mutation($input: ServiceCreateInput!){ serviceCreate(input:$input){ id name } }", variables:{input:{projectId:$p, name:$n, source:{image:"ghcr.io/railwayapp-templates/postgres-ssl:16"}}}}')"
+            RESP="$(gql "$BODY")"
+            if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
+              echo "::warning::Automatic Postgres provisioning failed. Add a PostgreSQL database to the '$RAILWAY_PROJECT_NAME' project manually (Railway dashboard -> New -> Database -> PostgreSQL) and re-run."
+              echo "$RESP" | sed 's/Bearer [^"]*/Bearer ***/g'
+            else
+              DB_ID="$(echo "$RESP" | jq -r '.data.serviceCreate.id')"
+              echo "::notice::Created Postgres service ($DB_ID)"
+            fi
+          fi
+          echo "db_id=${DB_ID}" >> "$GITHUB_OUTPUT"
+
+      # -- Ensure backend service exists -------------------------------------
+      - name: Ensure backend service
+        id: service
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          PROJECT_ID: ${{ steps.project.outputs.project_id }}
+        run: |
+          set -euo pipefail
+          gql() {
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" --data "$1"
+          }
+          SVC_ID="$(jq -r --arg n "$RAILWAY_BACKEND_SERVICE" \
+            '[.data.project.services.edges[].node | select(.name==$n) | .id][0] // ""' project.json)"
+          if [ -n "$SVC_ID" ]; then
+            echo "::notice::Backend service already exists ($SVC_ID)"
+          else
+            echo "Creating empty backend service (source attached via 'railway up')..."
+            BODY="$(jq -n --arg p "$PROJECT_ID" --arg n "$RAILWAY_BACKEND_SERVICE" \
+              '{query:"mutation($input: ServiceCreateInput!){ serviceCreate(input:$input){ id name } }", variables:{input:{projectId:$p, name:$n}}}')"
+            RESP="$(gql "$BODY")"
+            if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
+              echo "::error::Failed to create backend service."
+              echo "$RESP" | sed 's/Bearer [^"]*/Bearer ***/g'
+              exit 1
+            fi
+            SVC_ID="$(echo "$RESP" | jq -r '.data.serviceCreate.id')"
+            echo "::notice::Created backend service ($SVC_ID)"
+          fi
+          echo "service_id=$SVC_ID" >> "$GITHUB_OUTPUT"
+
+      # -- Set backend service variables idempotently ------------------------
+      - name: Set backend variables (idempotent)
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          PROJECT_ID: ${{ steps.project.outputs.project_id }}
+          ENV_ID: ${{ steps.environment.outputs.environment_id }}
+          SVC_ID: ${{ steps.service.outputs.service_id }}
+          DOMAIN: ${{ steps.domain.outputs.domain }}
+          RUN_SEED_INPUT: ${{ github.event.inputs.run_seed }}
+        run: |
+          set -euo pipefail
+          gql() {
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" --data "$1"
+          }
+
+          # Read existing variables so we never overwrite stable secrets.
+          BODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$SVC_ID" \
+            '{query:"query($p:String!,$e:String!,$s:String!){ variables(projectId:$p, environmentId:$e, serviceId:$s) }", variables:{p:$p,e:$e,s:$s}}')"
+          EXISTING="$(gql "$BODY")"
+          echo "$EXISTING" | jq -r '(.data.variables // {}) | keys | "Existing variable keys: " + (join(","))'
+          echo "$EXISTING" | jq '.data.variables // {}' > existing_vars.json
+
+          upsert() {
+            # upsert NAME VALUE (idempotent overwrite). Value passed via env to
+            # avoid quoting/logging issues.
+            local NAME="$1"; local VALUE="$2"
+            local BODY
+            BODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$SVC_ID" --arg name "$NAME" --arg value "$VALUE" \
+              '{query:"mutation($input: VariableUpsertInput!){ variableUpsert(input:$input) }", variables:{input:{projectId:$p, environmentId:$e, serviceId:$s, name:$name, value:$value}}}')"
+            local RESP
+            RESP="$(gql "$BODY")"
+            if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
+              echo "::error::Failed to set variable $NAME"
+              echo "$RESP" | sed 's/Bearer [^"]*/Bearer ***/g'
+              exit 1
+            fi
+            echo "  set $NAME"
+          }
+
+          have() {
+            # have NAME -> 0 if the variable exists and is non-empty.
+            jq -e --arg k "$1" '.[$k] // "" | length > 0' existing_vars.json >/dev/null 2>&1
+          }
+
+          # Stable secrets: generate only the FIRST time, then leave untouched.
+          if have JWT_SECRET; then
+            echo "  JWT_SECRET already present — leaving stable."
+          else
+            upsert JWT_SECRET "$(openssl rand -hex 32)"
+          fi
+          if have COOKIE_SECRET; then
+            echo "  COOKIE_SECRET already present — leaving stable."
+          else
+            upsert COOKIE_SECRET "$(openssl rand -hex 32)"
+          fi
+
+          CORS="https://${DOMAIN},https://*.vercel.app"
+
+          upsert NODE_ENV "production"
+          # Railway reference-variable syntax. The escapes below stop GitHub
+          # Actions from evaluating Railway's own ${{ ... }} template.
+          upsert DATABASE_URL "${{ '${{' }}Postgres.DATABASE_URL${{ '}}' }}"
+          upsert DATABASE_SSL "true"
+          upsert STORE_CORS "$CORS"
+          upsert ADMIN_CORS "$CORS"
+          upsert AUTH_CORS "$CORS"
+          upsert STRIPE_API_KEY "sk_test_placeholder"
+          upsert STRIPE_WEBHOOK_SECRET "whsec_placeholder"
+
+          # RUN_SEED defaults to true (first deploy). Re-run with run_seed=false
+          # afterwards so the non-idempotent seed never runs again.
+          upsert RUN_SEED "${RUN_SEED_INPUT:-true}"
+
+          echo "::notice::Backend variables applied. RUN_SEED=${RUN_SEED_INPUT:-true}"
+
+      # -- Deploy the current commit from the backend/ context ---------------
+      - name: Deploy backend (railway up)
+        working-directory: backend
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ steps.project.outputs.project_id }}
+          RAILWAY_ENVIRONMENT_ID: ${{ steps.environment.outputs.environment_id }}
+        run: |
+          set -euo pipefail
+          echo "Linking Railway project/service..."
+          railway link --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --service "$RAILWAY_BACKEND_SERVICE" \
+            || railway link --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_BACKEND_SERVICE" \
+            || true
+          echo "Uploading build context and deploying (streams the build)..."
+          # railway up builds from backend/ using apps/backend/Dockerfile (railway.json).
+          railway up --service "$RAILWAY_BACKEND_SERVICE" --detach
+
+      # -- Ensure a public domain and capture it -----------------------------
+      - name: Ensure backend public domain
+        id: backend_url
+        working-directory: backend
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ steps.project.outputs.project_id }}
+          RAILWAY_ENVIRONMENT_ID: ${{ steps.environment.outputs.environment_id }}
+        run: |
+          set -uo pipefail
+          echo "Requesting a public domain for the backend service..."
+          # 'railway domain' is idempotent: prints the existing domain or creates one.
+          OUT="$(railway domain --service "$RAILWAY_BACKEND_SERVICE" 2>&1 || true)"
+          echo "$OUT"
+          URL="$(echo "$OUT" | grep -oE 'https?://[A-Za-z0-9.-]+' | head -n1)"
+          if [ -z "$URL" ]; then
+            HOST="$(echo "$OUT" | grep -oE '[A-Za-z0-9.-]+\.up\.railway\.app' | head -n1)"
+            if [ -n "$HOST" ]; then URL="https://$HOST"; fi
+          fi
+          if [ -z "$URL" ]; then
+            echo "::error::Could not determine backend public domain from 'railway domain' output."
+            exit 1
+          fi
+          echo "backend_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "::notice::Backend URL = $URL"
+
+      # -- Wait for the deploy to be healthy ---------------------------------
+      - name: Wait for /health
+        env:
+          BACKEND_URL: ${{ steps.backend_url.outputs.backend_url }}
+        run: |
+          set -uo pipefail
+          echo "Polling ${BACKEND_URL}/health (up to ~10 minutes)..."
+          for i in $(seq 1 60); do
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' "${BACKEND_URL}/health" || echo 000)"
+            echo "  attempt $i -> HTTP $CODE"
+            if [ "$CODE" = "200" ]; then
+              echo "::notice::Backend healthy."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Backend did not become healthy in time. Check the Railway build/deploy logs."
+          exit 1
+
+      # -- Extract the publishable key (pk_...) from the deployed DB ----------
+      - name: Extract publishable key
+        id: pubkey
+        working-directory: backend/apps/backend
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ steps.project.outputs.project_id }}
+          RAILWAY_ENVIRONMENT_ID: ${{ steps.environment.outputs.environment_id }}
+        run: |
+          set -uo pipefail
+          echo "Reading the publishable key from the deployed database..."
+          RAW="$(railway run --service "$RAILWAY_BACKEND_SERVICE" -- npx medusa exec ./src/scripts/print-pubkey.ts 2>/dev/null || true)"
+          PK="$(echo "$RAW" | grep -oE 'pk_[A-Za-z0-9_]+' | tail -n1)"
+          if [ -z "$PK" ]; then
+            echo "::warning::Could not read a publishable key (pk_...). If this is the first deploy, ensure RUN_SEED=true created one. Re-run to set it on the storefront."
+            echo "publishable_key=" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Publishable key captured (pk_...${PK: -6})."
+            echo "publishable_key=$PK" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Backend job summary
+        env:
+          BACKEND_URL: ${{ steps.backend_url.outputs.backend_url }}
+        run: |
+          {
+            echo "## Backend (Railway)"
+            echo "- URL: ${BACKEND_URL}"
+            echo "- Admin: ${BACKEND_URL}/app"
+            echo "- Health: ${BACKEND_URL}/health"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # JOB 2 — Storefront on Vercel
+  # ---------------------------------------------------------------------------
+  deploy-frontend:
+    name: Deploy storefront (Vercel)
+    needs: deploy-backend
+    runs-on: ubuntu-latest
+    outputs:
+      frontend_url: ${{ steps.deploy.outputs.frontend_url }}
+      vercel_cname_target: ${{ steps.domain.outputs.vercel_cname_target }}
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      BACKEND_URL: ${{ needs.deploy-backend.outputs.backend_url }}
+      PUBLISHABLE_KEY: ${{ needs.deploy-backend.outputs.publishable_key }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Resolve deploy domain
+        id: rdomain
+        run: |
+          DOMAIN="${{ github.event.inputs.deploy_domain }}"
+          if [ -z "$DOMAIN" ]; then DOMAIN="${{ vars.DEPLOY_DOMAIN }}"; fi
+          if [ -z "$DOMAIN" ]; then DOMAIN="kr.respectathletic.com"; fi
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+
+      - name: Install Vercel CLI
+        run: |
+          npm i -g vercel@latest
+          vercel --version
+
+      - name: Verify Vercel auth
+        run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::error::VERCEL_TOKEN secret is not set."
+            exit 1
+          fi
+          vercel whoami --token "$VERCEL_TOKEN" || {
+            echo "::error::vercel whoami failed — is VERCEL_TOKEN valid?"
+            exit 1
+          }
+
+      # Link (or create) a Vercel project rooted at the storefront directory.
+      - name: Link/create Vercel project
+        id: link
+        working-directory: backend/apps/storefront
+        run: |
+          set -euo pipefail
+          echo "Linking Vercel project (creates it if missing)..."
+          vercel link --yes --project "$VERCEL_PROJECT_NAME" --token "$VERCEL_TOKEN"
+          if [ -f .vercel/project.json ]; then
+            ORG_ID="$(jq -r '.orgId' .vercel/project.json)"
+            PROJ_ID="$(jq -r '.projectId' .vercel/project.json)"
+            echo "org_id=$ORG_ID" >> "$GITHUB_OUTPUT"
+            echo "project_id=$PROJ_ID" >> "$GITHUB_OUTPUT"
+            echo "::notice::Vercel org=$ORG_ID project=$PROJ_ID"
+          fi
+
+      # Set production env vars idempotently: remove-then-add so re-runs update.
+      - name: Set Vercel env vars (production)
+        working-directory: backend/apps/storefront
+        run: |
+          set -uo pipefail
+          set_env() {
+            local KEY="$1"; local VAL="$2"
+            vercel env rm "$KEY" production --yes --token "$VERCEL_TOKEN" >/dev/null 2>&1 || true
+            printf '%s' "$VAL" | vercel env add "$KEY" production --token "$VERCEL_TOKEN" >/dev/null 2>&1 \
+              && echo "  set $KEY" \
+              || echo "::warning::Failed to set $KEY"
+          }
+          set_env NEXT_PUBLIC_MEDUSA_BACKEND_URL "$BACKEND_URL"
+          if [ -n "$PUBLISHABLE_KEY" ]; then
+            set_env NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY "$PUBLISHABLE_KEY"
+          else
+            echo "::warning::No publishable key from job 1 — skipping NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY. Set it and redeploy the storefront."
+          fi
+          set_env NEXT_PUBLIC_DEFAULT_REGION "us"
+          set_env NEXT_PUBLIC_BASE_URL "https://${{ steps.rdomain.outputs.domain }}"
+          set_env NEXT_PUBLIC_STRIPE_KEY "pk_test_placeholder"
+
+      - name: Build and deploy to production
+        id: deploy
+        working-directory: backend/apps/storefront
+        run: |
+          set -euo pipefail
+          echo "Pulling production project settings..."
+          vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
+          echo "Building (prod)..."
+          vercel build --prod --token "$VERCEL_TOKEN"
+          echo "Deploying prebuilt output to production..."
+          URL="$(vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN")"
+          echo "Vercel returned: $URL"
+          echo "frontend_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "::notice::Storefront URL = $URL"
+
+      - name: Add custom domain to Vercel project
+        id: domain
+        working-directory: backend/apps/storefront
+        run: |
+          set -uo pipefail
+          DOMAIN="${{ steps.rdomain.outputs.domain }}"
+          echo "Adding domain $DOMAIN to the Vercel project (idempotent)..."
+          OUT="$(vercel domains add "$DOMAIN" "$VERCEL_PROJECT_NAME" --token "$VERCEL_TOKEN" 2>&1 || true)"
+          echo "$OUT"
+          TARGET="$(echo "$OUT" | grep -oE 'cname[A-Za-z0-9.-]*\.vercel-dns\.com' | head -n1)"
+          if [ -z "$TARGET" ]; then TARGET="cname.vercel-dns.com"; fi
+          echo "vercel_cname_target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "::notice::CNAME target for $DOMAIN = $TARGET"
+
+      - name: Frontend job summary
+        run: |
+          {
+            echo "## Storefront (Vercel)"
+            echo "- Production URL: ${{ steps.deploy.outputs.frontend_url }}"
+            echo "- Custom domain: https://${{ steps.rdomain.outputs.domain }}"
+            echo "- CNAME target: ${{ steps.domain.outputs.vercel_cname_target }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # JOB 3 — DNS on Cloudflare
+  # ---------------------------------------------------------------------------
+  dns:
+    name: Configure DNS (Cloudflare)
+    needs: [deploy-backend, deploy-frontend]
+    runs-on: ubuntu-latest
+    env:
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CNAME_TARGET: ${{ needs.deploy-frontend.outputs.vercel_cname_target }}
+      BACKEND_URL: ${{ needs.deploy-backend.outputs.backend_url }}
+      FRONTEND_URL: ${{ needs.deploy-frontend.outputs.frontend_url }}
+    steps:
+      - name: Resolve deploy domain
+        id: rdomain
+        run: |
+          DOMAIN="${{ github.event.inputs.deploy_domain }}"
+          if [ -z "$DOMAIN" ]; then DOMAIN="${{ vars.DEPLOY_DOMAIN }}"; fi
+          if [ -z "$DOMAIN" ]; then DOMAIN="kr.respectathletic.com"; fi
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+          # Root zone = last two labels (respectathletic.com).
+          ZONE="$(echo "$DOMAIN" | awk -F. '{print $(NF-1)"."$NF}')"
+          echo "zone=$ZONE" >> "$GITHUB_OUTPUT"
+          echo "record=$DOMAIN" >> "$GITHUB_OUTPUT"
+
+      - name: Upsert Cloudflare CNAME
+        env:
+          ZONE: ${{ steps.rdomain.outputs.zone }}
+          RECORD: ${{ steps.rdomain.outputs.record }}
+        run: |
+          set -uo pipefail
+          if [ -z "$CF_TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN secret is not set."
+            exit 1
+          fi
+          TARGET="${CNAME_TARGET:-cname.vercel-dns.com}"
+          api() { curl -sS -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" "$@"; }
+
+          echo "Looking up zone id for $ZONE..."
+          ZRESP="$(api "https://api.cloudflare.com/client/v4/zones?name=${ZONE}")"
+          ZONE_ID="$(echo "$ZRESP" | jq -r '.result[0].id // ""')"
+          if [ -z "$ZONE_ID" ]; then
+            echo "::error::Could not find Cloudflare zone $ZONE. Is the domain in this Cloudflare account and the token scoped to it?"
+            echo "$ZRESP" | jq '.errors' || true
+            exit 1
+          fi
+          echo "::notice::Zone id = $ZONE_ID"
+
+          echo "Checking for an existing '$RECORD' CNAME..."
+          EXIST="$(api "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=CNAME&name=${RECORD}")"
+          REC_ID="$(echo "$EXIST" | jq -r '.result[0].id // ""')"
+
+          PAYLOAD="$(jq -n --arg name "$RECORD" --arg content "$TARGET" \
+            '{type:"CNAME", name:$name, content:$content, ttl:300, proxied:false}')"
+
+          if [ -n "$REC_ID" ]; then
+            echo "Updating existing record $REC_ID..."
+            RESP="$(api -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${REC_ID}" --data "$PAYLOAD")"
+          else
+            echo "Creating new CNAME record..."
+            RESP="$(api -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" --data "$PAYLOAD")"
+          fi
+
+          OK="$(echo "$RESP" | jq -r '.success')"
+          if [ "$OK" != "true" ]; then
+            echo "::error::Cloudflare DNS update failed."
+            echo "$RESP" | jq '.errors' || true
+            exit 1
+          fi
+          echo "::notice::DNS CNAME ${RECORD} -> ${TARGET} (proxied=false) upserted."
+
+      - name: Final summary
+        env:
+          DOMAIN: ${{ steps.rdomain.outputs.domain }}
+        run: |
+          TARGET="${CNAME_TARGET:-cname.vercel-dns.com}"
+          {
+            echo "## Deploy complete"
+            echo ""
+            echo "| What | Where |"
+            echo "|---|---|"
+            echo "| Backend (Medusa) | ${BACKEND_URL} |"
+            echo "| Admin | ${BACKEND_URL}/app |"
+            echo "| Storefront (Vercel) | ${FRONTEND_URL} |"
+            echo "| Public site | https://${DOMAIN} |"
+            echo "| DNS | ${DOMAIN} CNAME -> ${TARGET} (DNS only) |"
+            echo ""
+            echo "> DNS + SSL propagation may take a few minutes. Vercel issues HTTPS automatically once it sees the CNAME."
+            echo ">"
+            echo "> After the FIRST successful deploy, re-run this workflow with **run_seed = false** so the store is not re-seeded."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Backend:    ${BACKEND_URL}"
+          echo "Admin:      ${BACKEND_URL}/app"
+          echo "Storefront: ${FRONTEND_URL}"
+          echo "Site:       https://${DOMAIN}"

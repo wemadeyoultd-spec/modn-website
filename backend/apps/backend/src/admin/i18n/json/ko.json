@@ -1,0 +1,23 @@
+{
+  "productOptions": {
+    "domain": "옵션"
+  },
+  "roles": {
+    "domain": "역할"
+  },
+  "policies": {
+    "domain": "정책"
+  },
+  "refundReasons": {
+    "domain": "환불 사유"
+  },
+  "translations": {
+    "domain": "번역"
+  },
+  "shippingOptionTypes": {
+    "domain": "배송 옵션 유형"
+  },
+  "propertyLabels": {
+    "domain": "속성 라벨"
+  }
+}

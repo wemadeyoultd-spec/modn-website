@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 800 800" role="img" aria-label="Performance Bar placeholder">
+  <!-- PLACEHOLDER image: swap for real Sorinex CDN image (cdn.shopify.com shop 1/2559/4942) once allowlisted. See scratchpad/image-swap-TODO.md -->
+  <rect width="800" height="800" fill="#1a1a1a"/>
+  <rect x="20" y="20" width="760" height="760" fill="none" stroke="#c8102e" stroke-width="4"/>
+  <text x="400" y="120" fill="#c8102e" font-family="Arial, sans-serif" font-size="30" font-weight="bold" text-anchor="middle" letter-spacing="4">SORINEX</text>
+  <text x="400" y="410" fill="#ffffff" font-family="Arial, sans-serif" font-size="44" font-weight="bold" text-anchor="middle">Performance Bar</text>
+  <text x="400" y="470" fill="#9a9a9a" font-family="Arial, sans-serif" font-size="26" text-anchor="middle">Barbells & Specialty Bars</text>
+  <text x="400" y="720" fill="#6a6a6a" font-family="Arial, sans-serif" font-size="20" text-anchor="middle">PLACEHOLDER IMAGE</text>
+</svg>

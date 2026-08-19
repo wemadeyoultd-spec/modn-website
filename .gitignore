@@ -31,6 +31,9 @@ out/
 # Test coverage
 coverage/
 
+# Scratch / temp working files
+scratchpad/
+
 # OS / editor
 .DS_Store
 .DS_Store?

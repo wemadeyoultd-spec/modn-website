@@ -965,7 +965,11 @@ jobs:
           echo "Adding domain $DOMAIN to the Vercel project (idempotent)..."
           OUT="$(vercel domains add "$DOMAIN" "$VERCEL_PROJECT_NAME" --token "$VERCEL_TOKEN" 2>&1 || true)"
           echo "$OUT"
-          TARGET="$(echo "$OUT" | grep -oE 'cname[A-Za-z0-9.-]*\.vercel-dns\.com' | head -n1)"
+          # `|| true`: this step runs under bash -e, and grep exits non-zero when
+          # the output has no cname target (e.g. the domain is already added or
+          # only a verification hint is printed), which would otherwise abort the
+          # step before the fallback below runs.
+          TARGET="$(echo "$OUT" | grep -oE 'cname[A-Za-z0-9.-]*\.vercel-dns\.com' | head -n1 || true)"
           if [ -z "$TARGET" ]; then TARGET="cname.vercel-dns.com"; fi
           echo "vercel_cname_target=$TARGET" >> "$GITHUB_OUTPUT"
           echo "::notice::CNAME target for $DOMAIN = $TARGET"

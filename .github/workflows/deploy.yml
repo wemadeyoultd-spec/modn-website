@@ -202,12 +202,13 @@ jobs:
           echo "environment_id=$ENV_ID" >> "$GITHUB_OUTPUT"
           echo "::notice::Environment id = $ENV_ID"
 
-      # -- Ensure Postgres service exists ------------------------------------
+      # -- Ensure Postgres service exists + is configured as a managed DB ----
       - name: Ensure Postgres service
         id: postgres
         env:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
           PROJECT_ID: ${{ steps.project.outputs.project_id }}
+          ENV_ID: ${{ steps.environment.outputs.environment_id }}
         run: |
           set -euo pipefail
           gql() {
@@ -215,6 +216,8 @@ jobs:
               -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
               -H "Content-Type: application/json" --data "$1"
           }
+          scrub() { sed 's/Bearer [^"]*/Bearer ***/g'; }
+
           DB_ID="$(jq -r --arg n "$RAILWAY_DB_SERVICE" \
             '[.data.project.services.edges[].node | select(.name==$n) | .id][0] // ""' project.json)"
           if [ -n "$DB_ID" ]; then
@@ -226,13 +229,78 @@ jobs:
             RESP="$(gql "$BODY")"
             if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
               echo "::warning::Automatic Postgres provisioning failed. Add a PostgreSQL database to the '$RAILWAY_PROJECT_NAME' project manually (Railway dashboard -> New -> Database -> PostgreSQL) and re-run."
-              echo "$RESP" | sed 's/Bearer [^"]*/Bearer ***/g'
+              echo "$RESP" | scrub
             else
               DB_ID="$(echo "$RESP" | jq -r '.data.serviceCreate.id')"
               echo "::notice::Created Postgres service ($DB_ID)"
             fi
           fi
           echo "db_id=${DB_ID}" >> "$GITHUB_OUTPUT"
+
+          if [ -z "${DB_ID:-}" ]; then
+            echo "::error::No Postgres service id available; cannot configure managed DB variables."
+            exit 1
+          fi
+
+          # The bare postgres-ssl image needs POSTGRES_* env to initialise the DB
+          # cluster. Read whatever the service already has so we NEVER regenerate
+          # POSTGRES_PASSWORD (that would mismatch the initialised data volume).
+          upsert_db() {
+            local NAME="$1"; local VALUE="$2"
+            local BODY RESP
+            BODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$DB_ID" --arg name "$NAME" --arg value "$VALUE" \
+              '{query:"mutation($input: VariableUpsertInput!){ variableUpsert(input:$input) }", variables:{input:{projectId:$p, environmentId:$e, serviceId:$s, name:$name, value:$value}}}')"
+            RESP="$(gql "$BODY")"
+            if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
+              echo "::error::Failed to set Postgres variable $NAME"
+              echo "$RESP" | scrub
+              exit 1
+            fi
+            echo "  set Postgres $NAME"
+          }
+
+          echo "Reading existing Postgres service variables..."
+          PG_VARS_BODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$DB_ID" \
+            '{query:"query($p:String!,$e:String!,$s:String!){ variablesForServiceDeployment(projectId:$p, environmentId:$e, serviceId:$s) }", variables:{p:$p,e:$e,s:$s}}')"
+          PG_VARS_RESP="$(gql "$PG_VARS_BODY")"
+          if echo "$PG_VARS_RESP" | jq -e '.errors' >/dev/null 2>&1; then
+            echo "Note: could not read existing Postgres variables (service may be brand new)."
+            echo "$PG_VARS_RESP" | scrub
+            echo '{}' > pg_vars.json
+          else
+            echo "$PG_VARS_RESP" | jq '.data.variablesForServiceDeployment // {}' > pg_vars.json
+          fi
+
+          EXISTING_PW="$(jq -r '.POSTGRES_PASSWORD // ""' pg_vars.json)"
+          if [ -n "$EXISTING_PW" ]; then
+            echo "  POSTGRES_PASSWORD already present — reusing (never regenerated)."
+            PG_PW="$EXISTING_PW"
+          else
+            echo "  POSTGRES_PASSWORD missing — generating a new one (first init)."
+            PG_PW="$(openssl rand -hex 24)"
+            upsert_db POSTGRES_PASSWORD "$PG_PW"
+          fi
+          upsert_db POSTGRES_USER "postgres"
+          upsert_db POSTGRES_DB "railway"
+          upsert_db PGDATA "/var/lib/postgresql/data/pgdata"
+
+          # Trigger a (re)deploy of the Postgres service so it boots with these
+          # variables. Idempotent: repeated deploys of an already-initialised
+          # volume are safe because the password is reused, not regenerated.
+          echo "Triggering Postgres service deployment..."
+          DEP_BODY="$(jq -n --arg e "$ENV_ID" --arg s "$DB_ID" \
+            '{query:"mutation($e:String!,$s:String!){ serviceInstanceDeploy(environmentId:$e, serviceId:$s) }", variables:{e:$e,s:$s}}')"
+          DEP_RESP="$(gql "$DEP_BODY")"
+          if echo "$DEP_RESP" | jq -e '.errors' >/dev/null 2>&1; then
+            echo "::warning::serviceInstanceDeploy for Postgres returned an error (it may already be deploying)."
+            echo "$DEP_RESP" | scrub
+          else
+            echo "::notice::Postgres deployment triggered."
+          fi
+
+          # Give Postgres a moment to start booting before the backend deploy.
+          echo "Waiting ~30s for Postgres to begin booting..."
+          sleep 30
 
       # -- Ensure backend service exists -------------------------------------
       - name: Ensure backend service
@@ -329,35 +397,36 @@ jobs:
 
           upsert NODE_ENV "production"
 
-          # Resolve the ACTUAL Postgres connection string at runtime instead of
-          # emitting Railway's reference literal for Postgres.DATABASE_URL
-          # (which cannot be produced safely from a GitHub Actions expression).
-          # variablesForServiceDeployment returns the Postgres service's
-          # variables with Railway references already resolved to concrete
-          # values. Prefer the internal URL (postgres.railway.internal) since
-          # the backend and Postgres share the project's private network; fall
-          # back to the public proxy URL if the internal one is unavailable.
-          PG_URL=""
-          if [ -n "${DB_ID:-}" ]; then
-            PG_BODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$DB_ID" \
-              '{query:"query($p:String!,$e:String!,$s:String!){ variablesForServiceDeployment(projectId:$p, environmentId:$e, serviceId:$s) }", variables:{p:$p,e:$e,s:$s}}')"
-            PG_RESP="$(gql "$PG_BODY")"
-            if echo "$PG_RESP" | jq -e '.errors' >/dev/null 2>&1; then
-              echo "::warning::Could not read Postgres service variables to resolve DATABASE_URL."
-              echo "$PG_RESP" | sed 's/Bearer [^"]*/Bearer ***/g'
-            else
-              PG_URL="$(echo "$PG_RESP" | jq -r '.data.variablesForServiceDeployment.DATABASE_URL // ""')"
-              if [ -z "$PG_URL" ]; then
-                PG_URL="$(echo "$PG_RESP" | jq -r '.data.variablesForServiceDeployment.DATABASE_PUBLIC_URL // ""')"
-              fi
-            fi
-          fi
-          if [ -z "$PG_URL" ]; then
-            echo "::error::Could not resolve the Postgres DATABASE_URL from the Railway API. Ensure the Postgres service exists and has provisioned its connection variables."
+          # The bare postgres-ssl image does NOT publish a managed DATABASE_URL,
+          # so CONSTRUCT the connection string from the Postgres service's own
+          # variables. Re-resolve POSTGRES_PASSWORD (set/reused in the "Ensure
+          # Postgres service" step) and the service's private hostname here so
+          # no secret ever crosses a step boundary or gets printed.
+          if [ -z "${DB_ID:-}" ]; then
+            echo "::error::No Postgres service id available; cannot construct DATABASE_URL."
             exit 1
           fi
+          PG_BODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$DB_ID" \
+            '{query:"query($p:String!,$e:String!,$s:String!){ variablesForServiceDeployment(projectId:$p, environmentId:$e, serviceId:$s) }", variables:{p:$p,e:$e,s:$s}}')"
+          PG_RESP="$(gql "$PG_BODY")"
+          if echo "$PG_RESP" | jq -e '.errors' >/dev/null 2>&1; then
+            echo "::error::Could not read Postgres service variables to build DATABASE_URL."
+            echo "$PG_RESP" | sed 's/Bearer [^"]*/Bearer ***/g'
+            exit 1
+          fi
+          echo "$PG_RESP" | jq '.data.variablesForServiceDeployment // {}' > pg_vars.json
+          PG_PW="$(jq -r '.POSTGRES_PASSWORD // ""' pg_vars.json)"
+          PG_DB="$(jq -r '.POSTGRES_DB // "railway"' pg_vars.json)"
+          PG_HOST="$(jq -r '.RAILWAY_PRIVATE_DOMAIN // ""' pg_vars.json)"
+          if [ -z "$PG_HOST" ]; then PG_HOST="postgres.railway.internal"; fi
+          if [ -z "$PG_PW" ]; then
+            echo "::error::POSTGRES_PASSWORD not found on the Postgres service; cannot build DATABASE_URL."
+            exit 1
+          fi
+          # Private-network connection to the postgres-ssl image: no SSL needed.
+          PG_URL="postgresql://postgres:${PG_PW}@${PG_HOST}:5432/${PG_DB}"
           upsert DATABASE_URL "$PG_URL"
-          upsert DATABASE_SSL "true"
+          upsert DATABASE_SSL "false"
           upsert STORE_CORS "$CORS"
           upsert ADMIN_CORS "$CORS"
           upsert AUTH_CORS "$CORS"

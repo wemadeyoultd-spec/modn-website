@@ -8,6 +8,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+.deploy-secrets.env
 
 # Logs
 *.log

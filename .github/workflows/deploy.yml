@@ -433,6 +433,15 @@ jobs:
           upsert STRIPE_API_KEY "sk_test_placeholder"
           upsert STRIPE_WEBHOOK_SECRET "whsec_placeholder"
 
+          # Admin bootstrap credentials — the entrypoint creates this user when
+          # RUN_SEED=true. Idempotent: re-creating an existing user is a no-op.
+          upsert ADMIN_EMAIL "admin@medusa.local"
+          if have ADMIN_PASSWORD; then
+            echo "  ADMIN_PASSWORD already present — leaving stable."
+          else
+            upsert ADMIN_PASSWORD "supersecret"
+          fi
+
           # RUN_SEED defaults to true (first deploy). Re-run with run_seed=false
           # afterwards so the non-idempotent seed never runs again.
           upsert RUN_SEED "${RUN_SEED_INPUT:-true}"
@@ -588,8 +597,11 @@ jobs:
           BACKEND_URL: ${{ steps.backend_url.outputs.backend_url }}
         run: |
           set -uo pipefail
-          echo "Polling ${BACKEND_URL}/health (up to ~10 minutes)..."
-          for i in $(seq 1 60); do
+          echo "Polling ${BACKEND_URL}/health (up to ~15 minutes)..."
+          # The server now starts as soon as migrations finish (the seed runs in
+          # the background), so /health should return 200 within a couple of
+          # minutes even on a first deploy.
+          for i in $(seq 1 90); do
             CODE="$(curl -s -o /dev/null -w '%{http_code}' "${BACKEND_URL}/health" || echo 000)"
             echo "  attempt $i -> HTTP $CODE"
             if [ "$CODE" = "200" ]; then
@@ -600,6 +612,38 @@ jobs:
           done
           echo "::error::Backend did not become healthy in time. Check the Railway build/deploy logs."
           exit 1
+
+      # Always surface the container's runtime logs so the seed's progress /
+      # outcome is visible in the workflow output (whether or not /health passed).
+      - name: Tail Railway runtime logs
+        if: always()
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          PROJECT_ID: ${{ steps.project.outputs.project_id }}
+          ENV_ID: ${{ steps.environment.outputs.environment_id }}
+          SVC_ID: ${{ steps.service.outputs.service_id }}
+        run: |
+          set -uo pipefail
+          gql() {
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" --data "$1"
+          }
+          scrub() { sed 's/Bearer [^"]*/Bearer ***/g'; }
+
+          D_BODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$SVC_ID" \
+            '{query:"query($p:String!,$e:String!,$s:String!){ deployments(first:1, input:{projectId:$p, environmentId:$e, serviceId:$s}){ edges { node { id status } } } }", variables:{p:$p,e:$e,s:$s}}')"
+          D_RESP="$(gql "$D_BODY")"
+          DEP_ID="$(echo "$D_RESP" | jq -r '.data.deployments.edges[0].node.id // ""')"
+          DEP_STATUS="$(echo "$D_RESP" | jq -r '.data.deployments.edges[0].node.status // ""')"
+          echo "::notice::Latest deployment $DEP_ID status=$DEP_STATUS"
+          [ -z "$DEP_ID" ] && { echo "No deployment id; skipping log tail."; exit 0; }
+
+          echo "===== DEPLOY / RUNTIME LOGS (tail) ====="
+          L_BODY="$(jq -n --arg d "$DEP_ID" \
+            '{query:"query($d:String!){ deploymentLogs(deploymentId:$d, limit:400){ message severity } }", variables:{d:$d}}')"
+          gql "$L_BODY" | jq -r '.data.deploymentLogs[]?.message // empty' 2>/dev/null | tail -n 250 || true
+          echo "===== END RAILWAY LOGS ====="
 
       # -- Extract the publishable key (pk_...) from the deployed DB ----------
       - name: Extract publishable key
@@ -626,9 +670,19 @@ jobs:
             PROJECT_TOKEN="$(echo "$TOK_RESP" | jq -r '.data.projectTokenCreate // ""')"
             [ -n "$PROJECT_TOKEN" ] && echo "::add-mask::$PROJECT_TOKEN"
           fi
-          echo "Reading the publishable key from the deployed database..."
-          RAW="$(env -u RAILWAY_API_TOKEN RAILWAY_TOKEN="$PROJECT_TOKEN" railway run --service "$RAILWAY_BACKEND_SERVICE" -- npx medusa exec ./src/scripts/print-pubkey.ts 2>/dev/null || true)"
-          PK="$(echo "$RAW" | grep -oE 'pk_[A-Za-z0-9_]+' | tail -n1)"
+          # The seed runs in the background after the server starts, so the
+          # publishable key may not exist the instant /health goes green. Retry
+          # for a few minutes until the key (created early in initial-data-seed)
+          # appears in the DB.
+          echo "Reading the publishable key from the deployed database (retrying while seed runs)..."
+          PK=""
+          for i in $(seq 1 30); do
+            RAW="$(env -u RAILWAY_API_TOKEN RAILWAY_TOKEN="$PROJECT_TOKEN" railway run --service "$RAILWAY_BACKEND_SERVICE" -- npx medusa exec ./src/scripts/print-pubkey.ts 2>/dev/null || true)"
+            PK="$(echo "$RAW" | grep -oE 'pk_[A-Za-z0-9_]+' | tail -n1)"
+            if [ -n "$PK" ]; then break; fi
+            echo "  attempt $i: no publishable key yet; seed may still be running. Waiting 15s..."
+            sleep 15
+          done
           if [ -z "$PK" ]; then
             echo "::warning::Could not read a publishable key (pk_...). If this is the first deploy, ensure RUN_SEED=true created one. Re-run to set it on the storefront."
             echo "publishable_key=" >> "$GITHUB_OUTPUT"

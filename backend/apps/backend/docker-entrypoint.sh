@@ -67,19 +67,34 @@ if [ "$migrate_ok" -ne 1 ]; then
   exit 1
 fi
 
-if [ "$RUN_SEED" = "true" ]; then
-  echo "[entrypoint] RUN_SEED=true — seeding store data (one-time)..."
-  npx medusa exec ./src/migration-scripts/initial-data-seed.ts
-  npx medusa exec ./src/scripts/seed-sorinex.ts
-  npx medusa exec ./src/scripts/seed-us-region.ts
-  npx medusa exec ./src/scripts/fix-inventory.ts
+# ---------------------------------------------------------------------------
+# Seeding runs in the BACKGROUND so it never blocks the HTTP server from
+# starting. The platform healthcheck (and CI /health poll) gate the deploy on
+# GET /health returning 200; if the (non-idempotent, multi-minute) seed ran in
+# the foreground the server would not start until it finished, the healthcheck
+# would time out, and the deploy would be marked failed — leaving the public
+# domain returning 404. Backgrounding the seed lets the server come up in
+# seconds; the seed then populates the DB while the server serves. Each seed
+# step is non-fatal (guarded) so a single failing script cannot restart-loop
+# the container.
+# ---------------------------------------------------------------------------
+run_seeds() {
+  echo "[entrypoint][seed] RUN_SEED=true — seeding store data (one-time, background)..."
+  npx medusa exec ./src/migration-scripts/initial-data-seed.ts || echo "[entrypoint][seed] initial-data-seed FAILED"
+  npx medusa exec ./src/scripts/seed-sorinex.ts || echo "[entrypoint][seed] seed-sorinex FAILED"
+  npx medusa exec ./src/scripts/seed-us-region.ts || echo "[entrypoint][seed] seed-us-region FAILED"
+  npx medusa exec ./src/scripts/fix-inventory.ts || echo "[entrypoint][seed] fix-inventory FAILED"
 
   if [ -n "$ADMIN_EMAIL" ] && [ -n "$ADMIN_PASSWORD" ]; then
-    echo "[entrypoint] Creating admin user $ADMIN_EMAIL..."
-    npx medusa user -e "$ADMIN_EMAIL" -p "$ADMIN_PASSWORD" || true
+    echo "[entrypoint][seed] Creating admin user $ADMIN_EMAIL..."
+    npx medusa user -e "$ADMIN_EMAIL" -p "$ADMIN_PASSWORD" || echo "[entrypoint][seed] admin user creation failed (may already exist)"
   fi
 
-  echo "[entrypoint] Seeding complete. IMPORTANT: remove RUN_SEED before the next deploy."
+  echo "[entrypoint][seed] SEED COMPLETE. IMPORTANT: re-deploy with RUN_SEED=false before the next deploy."
+}
+
+if [ "$RUN_SEED" = "true" ]; then
+  ( run_seeds ) &
 fi
 
 echo "[entrypoint] Starting Medusa server..."

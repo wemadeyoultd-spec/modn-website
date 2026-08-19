@@ -8,9 +8,6 @@ import LocalizedClientLink from "@modules/common/components/localized-client-lin
 import { Text, clx } from "@modules/common/components/ui"
 import { Fragment } from "react"
 import CountrySelect from "../country-select"
-import LanguageSelect from "../language-select"
-import { Locale } from "@lib/data/locales"
-
 
 const SideMenuItems = {
   Home: "/",
@@ -21,13 +18,11 @@ const SideMenuItems = {
 
 type SideMenuProps = {
   regions: HttpTypes.StoreRegion[] | null
-  locales: Locale[] | null
-  currentLocale: string | null
+  categories?: HttpTypes.StoreProductCategory[] | null
 }
 
-const SideMenu = ({ regions, locales, currentLocale }: SideMenuProps) => {
+const SideMenu = ({ regions, categories }: SideMenuProps) => {
   const countryToggleState = useToggleState()
-  const languageToggleState = useToggleState()
 
   return (
     <div className="h-full">
@@ -38,7 +33,7 @@ const SideMenu = ({ regions, locales, currentLocale }: SideMenuProps) => {
               <div className="relative flex h-full">
                 <Popover.Button
                   data-testid="nav-menu-button"
-                  className="relative h-full flex items-center transition-all ease-out duration-200 focus:outline-none hover:text-ui-fg-base"
+                  className="relative h-full flex items-center transition-all ease-out duration-200 focus:outline-none hover:text-red-500 uppercase text-xs font-semibold tracking-wider"
                 >
                   Menu
                 </Popover.Button>
@@ -65,20 +60,20 @@ const SideMenu = ({ regions, locales, currentLocale }: SideMenuProps) => {
                 <PopoverPanel className="flex flex-col absolute w-full pr-4 sm:pr-0 sm:w-1/3 2xl:w-1/4 sm:min-w-min h-[calc(100vh-1rem)] z-[51] inset-x-0 text-sm text-ui-fg-on-color m-2 backdrop-blur-2xl">
                   <div
                     data-testid="nav-menu-popup"
-                    className="flex flex-col h-full bg-[rgba(3,7,18,0.5)] rounded-rounded justify-between p-6"
+                    className="flex flex-col h-full bg-[rgba(3,7,18,0.85)] rounded-rounded justify-between p-6 overflow-y-auto"
                   >
                     <div className="flex justify-end" id="xmark">
                       <button data-testid="close-menu-button" onClick={close}>
                         <XMark />
                       </button>
                     </div>
-                    <ul className="flex flex-col gap-6 items-start justify-start">
+                    <ul className="flex flex-col gap-4 items-start justify-start">
                       {Object.entries(SideMenuItems).map(([name, href]) => {
                         return (
                           <li key={name}>
                             <LocalizedClientLink
                               href={href}
-                              className="text-3xl leading-10 hover:text-ui-fg-disabled"
+                              className="text-2xl leading-10 hover:text-red-500"
                               onClick={close}
                               data-testid={`${name.toLowerCase()}-link`}
                             >
@@ -88,26 +83,27 @@ const SideMenu = ({ regions, locales, currentLocale }: SideMenuProps) => {
                         )
                       })}
                     </ul>
+
+                    {categories && categories.length > 0 && (
+                      <ul className="flex flex-col gap-2 items-start justify-start my-6">
+                        <span className="text-xs uppercase tracking-widest text-neutral-400 mb-1">
+                          Shop
+                        </span>
+                        {categories.map((c) => (
+                          <li key={c.id}>
+                            <LocalizedClientLink
+                              href={`/categories/${c.handle}`}
+                              className="text-base hover:text-red-500"
+                              onClick={close}
+                            >
+                              {c.name}
+                            </LocalizedClientLink>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
                     <div className="flex flex-col gap-y-6">
-                      {!!locales?.length && (
-                        <div
-                          className="flex justify-between"
-                          onMouseEnter={languageToggleState.open}
-                          onMouseLeave={languageToggleState.close}
-                        >
-                          <LanguageSelect
-                            toggleState={languageToggleState}
-                            locales={locales}
-                            currentLocale={currentLocale}
-                          />
-                          <ArrowRightMini
-                            className={clx(
-                              "transition-transform duration-150",
-                              languageToggleState.state ? "-rotate-90" : ""
-                            )}
-                          />
-                        </div>
-                      )}
                       <div
                         className="flex justify-between"
                         onMouseEnter={countryToggleState.open}
@@ -127,8 +123,7 @@ const SideMenu = ({ regions, locales, currentLocale }: SideMenuProps) => {
                         />
                       </div>
                       <Text className="flex justify-between txt-compact-small">
-                        © {new Date().getFullYear()} Medusa Store. All rights
-                        reserved.
+                        © {new Date().getFullYear()} MODN. All rights reserved.
                       </Text>
                     </div>
                   </div>

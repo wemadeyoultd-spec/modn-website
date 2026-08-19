@@ -111,5 +111,15 @@ if [ "$RUN_SEED" = "true" ]; then
   ( run_seeds ) &
 fi
 
-echo "[entrypoint] Starting Medusa server..."
+echo "[entrypoint] Starting Medusa server from the build output (.medusa/server)..."
+# Medusa v2 emits the compiled server + the admin dashboard into
+# .medusa/server (admin at .medusa/server/public/admin). `medusa start` must run
+# from that build-output directory or it aborts on boot with:
+#   "Could not find index.html in the admin build directory. Make sure to run
+#    'medusa build' before starting the server."
+# which crash-loops the container so /health never turns green. Migrations and
+# the (backgrounded) seed above run from the project root against the TypeScript
+# sources; only the long-running server switches into the build output. The seed
+# subshell forked above keeps its own working directory, unaffected by this cd.
+cd .medusa/server
 exec npx medusa start

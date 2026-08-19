@@ -61,6 +61,10 @@ jobs:
           DOMAIN="${{ github.event.inputs.deploy_domain }}"
           if [ -z "$DOMAIN" ]; then DOMAIN="${{ vars.DEPLOY_DOMAIN }}"; fi
           if [ -z "$DOMAIN" ]; then DOMAIN="kr.respectathletic.com"; fi
+          # Normalize to a bare hostname: strip any scheme and path. A scheme in
+          # DEPLOY_DOMAIN would otherwise produce https://https://... — an invalid
+          # URL that crashes the storefront's metadataBase and breaks the DNS record.
+          DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%%/*}"
           echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
           echo "::notice::Deploy domain = $DOMAIN"
 
@@ -875,6 +879,7 @@ jobs:
           DOMAIN="${{ github.event.inputs.deploy_domain }}"
           if [ -z "$DOMAIN" ]; then DOMAIN="${{ vars.DEPLOY_DOMAIN }}"; fi
           if [ -z "$DOMAIN" ]; then DOMAIN="kr.respectathletic.com"; fi
+          DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%%/*}"
           echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
 
       - name: Install Vercel CLI
@@ -988,6 +993,7 @@ jobs:
           DOMAIN="${{ github.event.inputs.deploy_domain }}"
           if [ -z "$DOMAIN" ]; then DOMAIN="${{ vars.DEPLOY_DOMAIN }}"; fi
           if [ -z "$DOMAIN" ]; then DOMAIN="kr.respectathletic.com"; fi
+          DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%%/*}"
           echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
           # Root zone = last two labels (respectathletic.com).
           ZONE="$(echo "$DOMAIN" | awk -F. '{print $(NF-1)"."$NF}')"

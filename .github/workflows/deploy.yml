@@ -941,37 +941,17 @@ jobs:
         working-directory: backend/apps/storefront
         run: |
           set -euo pipefail
-          echo "Pulling production project settings..."
-          vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
-          # IMPORTANT: Vercel stores CLI-added env vars as "sensitive", so
-          # `vercel pull` cannot read them back and writes the literal placeholder
-          # "[SENSITIVE]" into the env file. next build then sees e.g.
-          # NEXT_PUBLIC_MEDUSA_BACKEND_URL="[SENSITIVE]" (an invalid URL) and the
-          # deployed storefront would ship a broken publishable key. Inject the
-          # REAL values two ways so they win: (1) a highest-precedence
-          # .env.production.local file, and (2) inline env on the build command
-          # (process.env overrides every .env file in Next.js).
-          BASE_URL="https://${{ steps.rdomain.outputs.domain }}"
-          {
-            echo "NEXT_PUBLIC_MEDUSA_BACKEND_URL=$BACKEND_URL"
-            [ -n "$PUBLISHABLE_KEY" ] && echo "NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY=$PUBLISHABLE_KEY"
-            echo "NEXT_PUBLIC_DEFAULT_REGION=us"
-            echo "NEXT_PUBLIC_BASE_URL=$BASE_URL"
-            echo "NEXT_PUBLIC_STRIPE_KEY=pk_test_placeholder"
-          } > .env.production.local
-          echo "Resolved public build URLs: backend=$BACKEND_URL base=$BASE_URL region=us"
-          if [ -z "$PUBLISHABLE_KEY" ]; then
-            echo "::error::No publishable key available for the storefront build; products will not load."
-          fi
-          echo "Building (prod)..."
-          NEXT_PUBLIC_MEDUSA_BACKEND_URL="$BACKEND_URL" \
-          NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY="$PUBLISHABLE_KEY" \
-          NEXT_PUBLIC_DEFAULT_REGION="us" \
-          NEXT_PUBLIC_BASE_URL="$BASE_URL" \
-          NEXT_PUBLIC_STRIPE_KEY="pk_test_placeholder" \
-            vercel build --prod --token "$VERCEL_TOKEN"
-          echo "Deploying prebuilt output to production..."
-          URL="$(vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN")"
+          # Deploy with a REMOTE Vercel build (no `vercel build`/`--prebuilt`).
+          # Rationale: (1) `vercel pull` returns "[SENSITIVE]" placeholders for
+          # the sensitive NEXT_PUBLIC_* vars, which broke local builds; a remote
+          # build reads the project's REAL env values server-side. (2) The
+          # prebuilt deploy tripped over a workspace-hoisted dependency
+          # (@opentelemetry/api not under storefront/node_modules). Vercel's own
+          # build installs deps and applies env correctly. The NEXT_PUBLIC_* vars
+          # were set on the project in the previous step; the backend URL and the
+          # real publishable key are inlined by Vercel at build time.
+          echo "Deploying to production (Vercel remote build)..."
+          URL="$(vercel deploy --prod --yes --token "$VERCEL_TOKEN")"
           echo "Vercel returned: $URL"
           echo "frontend_url=$URL" >> "$GITHUB_OUTPUT"
           echo "::notice::Storefront URL = $URL"

@@ -12,6 +12,13 @@ on:
           - "true"
           - "false"
         default: "true"
+      reset_db:
+        description: "DESTRUCTIVE: drop and recreate the DB public schema before migrating/seeding (sets RESET_DB). Use to recover a half-seeded volume; set false on normal deploys."
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
       deploy_domain:
         description: "Custom domain to attach (overrides the DEPLOY_DOMAIN repo variable)."
         required: false
@@ -393,6 +400,7 @@ jobs:
           PROXY_PORT: ${{ steps.postgres.outputs.proxy_port }}
           DOMAIN: ${{ steps.domain.outputs.domain }}
           RUN_SEED_INPUT: ${{ github.event.inputs.run_seed }}
+          RESET_DB_INPUT: ${{ github.event.inputs.reset_db }}
         run: |
           set -euo pipefail
           gql() {
@@ -501,7 +509,11 @@ jobs:
           # afterwards so the non-idempotent seed never runs again.
           upsert RUN_SEED "${RUN_SEED_INPUT:-true}"
 
-          echo "::notice::Backend variables applied. RUN_SEED=${RUN_SEED_INPUT:-true}"
+          # RESET_DB defaults to false. Set true only to wipe a half-seeded DB
+          # once; the entrypoint drops+recreates the public schema before migrate.
+          upsert RESET_DB "${RESET_DB_INPUT:-false}"
+
+          echo "::notice::Backend variables applied. RUN_SEED=${RUN_SEED_INPUT:-true} RESET_DB=${RESET_DB_INPUT:-false}"
 
       # -- Deploy the current commit from the backend/ context ---------------
       - name: Deploy backend (railway up)
@@ -794,21 +806,23 @@ jobs:
             PROJECT_TOKEN="$(echo "$TOK_RESP" | jq -r '.data.projectTokenCreate // ""')"
             [ -n "$PROJECT_TOKEN" ] && echo "::add-mask::$PROJECT_TOKEN"
           fi
-          # The seed runs in the background after the server starts, so the
-          # publishable key may not exist the instant /health goes green. Retry
-          # for a few minutes until the key (created early in initial-data-seed)
-          # appears in the DB.
-          echo "Reading the publishable key from the deployed database (retrying while seed runs)..."
+          # print-pubkey.ts CREATES a publishable key (and links it to the sales
+          # channel) if none exists, so this should return a pk_ on the first
+          # try. Retry a few minutes anyway in case the server is still booting
+          # or the seed is mid-flight. NOTE: this step runs under `bash -e`; every
+          # pipeline whose non-zero exit is acceptable (grep no-match) MUST end in
+          # `|| true`, or errexit aborts the whole step before the loop can retry.
+          echo "Resolving the publishable key from the deployed database..."
           PK=""
           for i in $(seq 1 30); do
             RAW="$(env -u RAILWAY_API_TOKEN RAILWAY_TOKEN="$PROJECT_TOKEN" railway run --service "$RAILWAY_BACKEND_SERVICE" -- npx medusa exec ./src/scripts/print-pubkey.ts 2>/dev/null || true)"
-            PK="$(echo "$RAW" | grep -oE 'pk_[A-Za-z0-9_]+' | tail -n1)"
+            PK="$(printf '%s\n' "$RAW" | grep -oE 'pk_[A-Za-z0-9_]+' | tail -n1 || true)"
             if [ -n "$PK" ]; then break; fi
-            echo "  attempt $i: no publishable key yet; seed may still be running. Waiting 15s..."
+            echo "  attempt $i: no publishable key yet; server/seed may still be starting. Waiting 15s..."
             sleep 15
           done
           if [ -z "$PK" ]; then
-            echo "::warning::Could not read a publishable key (pk_...). If this is the first deploy, ensure RUN_SEED=true created one. Re-run to set it on the storefront."
+            echo "::error::Could not resolve a publishable key (pk_...) after retries. print-pubkey.ts should create one; check the backend runtime logs above for the reason. The storefront build will fail without it."
             echo "publishable_key=" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::Publishable key captured (pk_...${PK: -6})."

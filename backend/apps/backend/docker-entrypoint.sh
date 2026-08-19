@@ -62,6 +62,26 @@ wait_for_postgres() {
 
 wait_for_postgres
 
+# ---------------------------------------------------------------------------
+# Optional one-time DESTRUCTIVE reset. When RESET_DB=true, drop and recreate the
+# public schema BEFORE migrations so migrations + seed run against a truly empty
+# database. Use this to recover from a persistent volume left in a half-seeded
+# state (e.g. after an earlier crash-loop), then set RESET_DB=false again.
+# ---------------------------------------------------------------------------
+if [ "$RESET_DB" = "true" ]; then
+  echo "[entrypoint] RESET_DB=true — dropping and recreating public schema (DESTRUCTIVE)..."
+  node -e '
+    const { Client } = require("pg");
+    const ssl = process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : undefined;
+    const c = new Client({ connectionString: process.env.DATABASE_URL, ssl });
+    c.connect()
+      .then(() => c.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+      .then(() => { console.log("[entrypoint] public schema dropped and recreated."); return c.end(); })
+      .then(() => process.exit(0))
+      .catch((e) => { console.error("[entrypoint] RESET_DB failed:", e.message); process.exit(1); });
+  ' || { echo "[entrypoint] RESET_DB step failed; aborting."; exit 1; }
+fi
+
 echo "[entrypoint] Running database migrations..."
 # Retry migrations for a while in case Postgres is still finishing startup or
 # the private network is still warming up (~10 attempts x 15s ≈ 2.5m).

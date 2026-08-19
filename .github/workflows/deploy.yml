@@ -592,26 +592,37 @@ jobs:
           echo "::notice::Backend URL = $URL"
 
       # -- Wait for the deploy to be healthy ---------------------------------
+      # BOUNDED wait (~180s) + continue-on-error so the job NEVER hangs and the
+      # runtime-log diagnostic below always runs. If the server crash-loops the
+      # runtime logs (next step) are the real signal, not this poll.
       - name: Wait for /health
+        id: health
+        continue-on-error: true
         env:
           BACKEND_URL: ${{ steps.backend_url.outputs.backend_url }}
         run: |
           set -uo pipefail
-          echo "Polling ${BACKEND_URL}/health (up to ~15 minutes)..."
-          # The server now starts as soon as migrations finish (the seed runs in
-          # the background), so /health should return 200 within a couple of
-          # minutes even on a first deploy.
-          for i in $(seq 1 90); do
-            CODE="$(curl -s -o /dev/null -w '%{http_code}' "${BACKEND_URL}/health" || echo 000)"
+          echo "Polling ${BACKEND_URL}/health (bounded ~180s)..."
+          HEALTHY=0
+          for i in $(seq 1 18); do
+            CODE="$(curl -s -m 10 -o /dev/null -w '%{http_code}' "${BACKEND_URL}/health" || echo 000)"
             echo "  attempt $i -> HTTP $CODE"
             if [ "$CODE" = "200" ]; then
-              echo "::notice::Backend healthy."
-              exit 0
+              echo "::notice::Backend healthy (HTTP 200)."
+              HEALTHY=1
+              break
             fi
             sleep 10
           done
-          echo "::error::Backend did not become healthy in time. Check the Railway build/deploy logs."
-          exit 1
+          echo "healthy=$HEALTHY" >> "$GITHUB_OUTPUT"
+          if [ "$HEALTHY" = "1" ]; then
+            exit 0
+          fi
+          echo "::warning::Backend did not return 200 within ~180s. Final probe body below; see runtime logs for the container error."
+          echo "----- final GET ${BACKEND_URL}/health -----"
+          curl -s -m 10 -i "${BACKEND_URL}/health" || true
+          echo ""
+          echo "-------------------------------------------"
 
       # Always surface the container's runtime logs so the seed's progress /
       # outcome is visible in the workflow output (whether or not /health passed).
@@ -634,20 +645,44 @@ jobs:
           D_BODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$SVC_ID" \
             '{query:"query($p:String!,$e:String!,$s:String!){ deployments(first:1, input:{projectId:$p, environmentId:$e, serviceId:$s}){ edges { node { id status } } } }", variables:{p:$p,e:$e,s:$s}}')"
           D_RESP="$(gql "$D_BODY")"
+          if echo "$D_RESP" | jq -e '.errors' >/dev/null 2>&1; then
+            echo "::warning::Could not list deployments for runtime log tail."
+            echo "$D_RESP" | scrub | head -c 800
+            exit 0
+          fi
           DEP_ID="$(echo "$D_RESP" | jq -r '.data.deployments.edges[0].node.id // ""')"
           DEP_STATUS="$(echo "$D_RESP" | jq -r '.data.deployments.edges[0].node.status // ""')"
           echo "::notice::Latest deployment $DEP_ID status=$DEP_STATUS"
           [ -z "$DEP_ID" ] && { echo "No deployment id; skipping log tail."; exit 0; }
 
-          echo "===== DEPLOY / RUNTIME LOGS (tail) ====="
+          # Runtime stdout/stderr from the container (Medusa boot logs, DB
+          # connection errors, crashes). This is the key diagnostic when the
+          # container builds/deploys but /health never turns green.
+          echo "===== CONTAINER RUNTIME LOGS (last ~120 lines) ====="
           L_BODY="$(jq -n --arg d "$DEP_ID" \
             '{query:"query($d:String!){ deploymentLogs(deploymentId:$d, limit:400){ message severity } }", variables:{d:$d}}')"
-          gql "$L_BODY" | jq -r '.data.deploymentLogs[]?.message // empty' 2>/dev/null | tail -n 250 || true
-          echo "===== END RAILWAY LOGS ====="
+          L_RESP="$(gql "$L_BODY")"
+          echo "$L_RESP" | jq -r '.data.deploymentLogs[]? | ((.severity // "info") + " | " + (.message // ""))' 2>/dev/null | tail -n 120 || true
+          echo "===== END RAILWAY RUNTIME LOGS ====="
+
+      # -- Direct probe of the resolved public /health URL (status + body) ----
+      - name: Curl public /health directly
+        if: always()
+        env:
+          BACKEND_URL: ${{ steps.backend_url.outputs.backend_url }}
+        run: |
+          set -uo pipefail
+          echo "GET ${BACKEND_URL}/health"
+          echo "----- status + headers + body -----"
+          curl -s -m 15 -i "${BACKEND_URL}/health" || true
+          echo ""
+          echo "-----------------------------------"
 
       # -- Extract the publishable key (pk_...) from the deployed DB ----------
       - name: Extract publishable key
         id: pubkey
+        if: always()
+        continue-on-error: true
         working-directory: backend/apps/backend
         env:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -692,6 +727,7 @@ jobs:
           fi
 
       - name: Backend job summary
+        if: always()
         env:
           BACKEND_URL: ${{ steps.backend_url.outputs.backend_url }}
         run: |

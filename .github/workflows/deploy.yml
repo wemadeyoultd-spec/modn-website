@@ -838,6 +838,87 @@ jobs:
             echo "publishable_key=$PK" >> "$GITHUB_OUTPUT"
           fi
 
+      # -- Gate the frontend build on the background seed finishing -----------
+      # The container runs the (non-idempotent, multi-minute) Sorinex seed in the
+      # BACKGROUND so /health turns green fast. But the storefront build fetches
+      # the catalog at build time, and the frontend job starts as soon as this
+      # backend job finishes — which previously happened BEFORE the seed
+      # completed, so Vercel prerendered the leftover DEMO catalog (t-shirt /
+      # sweatshirt / sweatpants). Poll the live DB via psql (railway run injects
+      # DATABASE_URL; psql is preinstalled on the runner) until the 11 Sorinex
+      # products are active and the demo products are gone, so the frontend build
+      # (needs: deploy-backend) only runs once the catalog is correct. Also prints
+      # the live product/category list for verification.
+      - name: Wait for Sorinex seed + verify catalog
+        id: catalog
+        working-directory: backend/apps/backend
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ steps.project.outputs.project_id }}
+          RAILWAY_ENVIRONMENT_ID: ${{ steps.environment.outputs.environment_id }}
+        run: |
+          set -uo pipefail
+          gql() {
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" --data "$1"
+          }
+          # Mint a project token for the CLI (workspace token is rejected by the CLI).
+          PROJECT_TOKEN=""
+          TOK_BODY="$(jq -n --arg p "$RAILWAY_PROJECT_ID" --arg e "$RAILWAY_ENVIRONMENT_ID" --arg n "ci-catalog-${GITHUB_RUN_ID}" \
+            '{query:"mutation($input: ProjectTokenCreateInput!){ projectTokenCreate(input:$input) }", variables:{input:{name:$n, projectId:$p, environmentId:$e}}}')"
+          TOK_RESP="$(gql "$TOK_BODY")"
+          if ! echo "$TOK_RESP" | jq -e '.errors' >/dev/null 2>&1; then
+            PROJECT_TOKEN="$(echo "$TOK_RESP" | jq -r '.data.projectTokenCreate // ""')"
+            [ -n "$PROJECT_TOKEN" ] && echo "::add-mask::$PROJECT_TOKEN"
+          fi
+          if [ -z "$PROJECT_TOKEN" ]; then
+            echo "::warning::Could not mint a project token to verify the catalog; skipping the seed gate."
+            echo "seeded=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          psql_q() {
+            # psql_q SQL -> prints the scalar/rows; DATABASE_URL injected by railway run.
+            env -u RAILWAY_API_TOKEN RAILWAY_TOKEN="$PROJECT_TOKEN" \
+              railway run --service "$RAILWAY_BACKEND_SERVICE" -- \
+              bash -c "psql \"\$DATABASE_URL\" -tAc \"$1\"" 2>/dev/null || true
+          }
+
+          SORINEX_HANDLES="'xl-half-rack','performance-bar','0-90-np4-adjustable-bench','training-bumpers','sorinex-kettlebell','delta-sled','x-factor-rotational-power-machine','fat-bar','10-bar-storage-unit','sorinex-strength-and-conditioning-tee','od-strength-and-conditioning-tee'"
+          DEMO_HANDLES="'t-shirt','sweatshirt','sweatpants','shorts'"
+          SORINEX_SQL="SELECT count(*) FROM product WHERE deleted_at IS NULL AND handle IN (${SORINEX_HANDLES});"
+          DEMO_SQL="SELECT count(*) FROM product WHERE deleted_at IS NULL AND handle IN (${DEMO_HANDLES});"
+
+          echo "Polling the live DB for the Sorinex catalog (background seed, up to ~10m)..."
+          SEEDED=0
+          for i in $(seq 1 40); do
+            SCOUNT="$(psql_q "$SORINEX_SQL" | grep -oE '^[0-9]+' | tail -n1 || true)"
+            DCOUNT="$(psql_q "$DEMO_SQL"    | grep -oE '^[0-9]+' | tail -n1 || true)"
+            SCOUNT="${SCOUNT:-?}"; DCOUNT="${DCOUNT:-?}"
+            echo "  attempt $i: active Sorinex products=$SCOUNT, active demo products=$DCOUNT"
+            if [ "$SCOUNT" = "11" ] && [ "$DCOUNT" = "0" ]; then
+              SEEDED=1
+              break
+            fi
+            sleep 15
+          done
+
+          echo "===== LIVE CATALOG — active products ====="
+          psql_q "SELECT title FROM product WHERE deleted_at IS NULL ORDER BY title;" || true
+          echo "===== LIVE CATALOG — active categories ====="
+          psql_q "SELECT name FROM product_category WHERE deleted_at IS NULL ORDER BY name;" || true
+          echo "=========================================="
+
+          if [ "$SEEDED" = "1" ]; then
+            echo "::notice::Sorinex catalog is live (11 products active, demo products gone). Storefront build may proceed."
+            echo "seeded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Sorinex catalog not fully seeded after wait (Sorinex active=$SCOUNT, demo active=$DCOUNT). The storefront would prerender the wrong catalog; failing so this is visible."
+            echo "seeded=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
       - name: Backend job summary
         if: always()
         env:

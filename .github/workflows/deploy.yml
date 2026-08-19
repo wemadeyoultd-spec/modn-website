@@ -486,6 +486,55 @@ jobs:
           env -u RAILWAY_API_TOKEN RAILWAY_TOKEN="$PROJECT_TOKEN" \
             railway up --ci --service "$RAILWAY_SERVICE_ID"
 
+      # -- On deploy failure, pull the container's own logs for diagnosis -----
+      # 'railway up --ci' streams build + healthcheck status but NOT the app's
+      # runtime stdout. If the deploy fails (e.g. crash on boot, migration or
+      # seed error, or a slow first-boot seed), fetch the latest deployment's
+      # build + deploy logs via GraphQL (team token works fine for the API).
+      - name: Dump Railway deploy logs on failure
+        if: failure()
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          PROJECT_ID: ${{ steps.project.outputs.project_id }}
+          ENV_ID: ${{ steps.environment.outputs.environment_id }}
+          SVC_ID: ${{ steps.service.outputs.service_id }}
+        run: |
+          set -uo pipefail
+          gql() {
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" --data "$1"
+          }
+          scrub() { sed 's/Bearer [^"]*/Bearer ***/g'; }
+
+          echo "Finding the latest deployment for the backend service..."
+          D_BODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$SVC_ID" \
+            '{query:"query($p:String!,$e:String!,$s:String!){ deployments(first:1, input:{projectId:$p, environmentId:$e, serviceId:$s}){ edges { node { id status createdAt } } } }", variables:{p:$p,e:$e,s:$s}}')"
+          D_RESP="$(gql "$D_BODY")"
+          if echo "$D_RESP" | jq -e '.errors' >/dev/null 2>&1; then
+            echo "::warning::Could not list deployments for log dump."
+            echo "$D_RESP" | scrub | head -c 800
+            exit 0
+          fi
+          DEP_ID="$(echo "$D_RESP" | jq -r '.data.deployments.edges[0].node.id // ""')"
+          DEP_STATUS="$(echo "$D_RESP" | jq -r '.data.deployments.edges[0].node.status // ""')"
+          echo "::notice::Latest deployment $DEP_ID status=$DEP_STATUS"
+          if [ -z "$DEP_ID" ]; then
+            echo "::warning::No deployment id found; cannot fetch logs."
+            exit 0
+          fi
+
+          echo "===== BUILD LOGS (tail) ====="
+          B_BODY="$(jq -n --arg d "$DEP_ID" \
+            '{query:"query($d:String!){ buildLogs(deploymentId:$d, limit:200){ message severity } }", variables:{d:$d}}')"
+          gql "$B_BODY" | jq -r '.data.buildLogs[]?.message // empty' 2>/dev/null | tail -n 120 || true
+
+          echo "===== DEPLOY / RUNTIME LOGS (tail) ====="
+          L_BODY="$(jq -n --arg d "$DEP_ID" \
+            '{query:"query($d:String!){ deploymentLogs(deploymentId:$d, limit:400){ message severity } }", variables:{d:$d}}')"
+          gql "$L_BODY" | jq -r '.data.deploymentLogs[]?.message // empty' 2>/dev/null | tail -n 250 || true
+          echo "===== END RAILWAY LOGS ====="
+
       # -- Ensure a public domain and capture it -----------------------------
       - name: Ensure backend public domain
         id: backend_url

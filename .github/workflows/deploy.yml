@@ -806,19 +806,24 @@ jobs:
             PROJECT_TOKEN="$(echo "$TOK_RESP" | jq -r '.data.projectTokenCreate // ""')"
             [ -n "$PROJECT_TOKEN" ] && echo "::add-mask::$PROJECT_TOKEN"
           fi
-          # print-pubkey.ts CREATES a publishable key (and links it to the sales
-          # channel) if none exists, so this should return a pk_ on the first
-          # try. Retry a few minutes anyway in case the server is still booting
-          # or the seed is mid-flight. NOTE: this step runs under `bash -e`; every
-          # pipeline whose non-zero exit is acceptable (grep no-match) MUST end in
-          # `|| true`, or errexit aborts the whole step before the loop can retry.
-          echo "Resolving the publishable key from the deployed database..."
+          # Read the publishable key straight from the deployed DB. NOTE: earlier
+          # this ran `railway run -- npx medusa exec print-pubkey.ts`, but
+          # `railway run` executes on the CI runner (which has no built Medusa
+          # app / node_modules), so the script never actually ran and no key was
+          # produced. Instead, query the api_key table directly with psql
+          # (preinstalled on ubuntu-latest); `railway run` injects DATABASE_URL,
+          # and the inner `bash -c` expands it after injection. The seed creates
+          # the publishable key early, so retry while the seed runs.
+          # This step runs under `bash -e`; pipelines whose non-zero exit is
+          # acceptable (grep no-match) MUST end in `|| true` or errexit aborts.
+          SQL="SELECT token FROM api_key WHERE type = 'publishable' AND revoked_at IS NULL AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1;"
+          echo "Resolving the publishable key from the deployed database via psql..."
           PK=""
           for i in $(seq 1 30); do
-            RAW="$(env -u RAILWAY_API_TOKEN RAILWAY_TOKEN="$PROJECT_TOKEN" railway run --service "$RAILWAY_BACKEND_SERVICE" -- npx medusa exec ./src/scripts/print-pubkey.ts 2>/dev/null || true)"
+            RAW="$(env -u RAILWAY_API_TOKEN RAILWAY_TOKEN="$PROJECT_TOKEN" railway run --service "$RAILWAY_BACKEND_SERVICE" -- bash -c "psql \"\$DATABASE_URL\" -tAc \"$SQL\"" 2>/dev/null || true)"
             PK="$(printf '%s\n' "$RAW" | grep -oE 'pk_[A-Za-z0-9_]+' | tail -n1 || true)"
             if [ -n "$PK" ]; then break; fi
-            echo "  attempt $i: no publishable key yet; server/seed may still be starting. Waiting 15s..."
+            echo "  attempt $i: no publishable key in DB yet; seed may still be running. Waiting 15s..."
             sleep 15
           done
           if [ -z "$PK" ]; then

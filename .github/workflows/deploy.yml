@@ -64,17 +64,54 @@ jobs:
 
       - name: Verify Railway auth
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
         run: |
-          if [ -z "$RAILWAY_TOKEN" ]; then
+          set -uo pipefail
+          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
             echo "::error::RAILWAY_API_TOKEN secret is not set."
             exit 1
           fi
-          echo "Checking Railway account (whoami)..."
-          railway whoami || {
-            echo "::error::railway whoami failed — is RAILWAY_API_TOKEN a valid account/team token?"
-            exit 1
+          # NOTE: 'railway whoami' does NOT work with a workspace/team token
+          # (team tokens are not user-bound). Verify the token via a GraphQL
+          # call instead, matching how the rest of the job uses Bearer auth.
+          probe() {
+            # probe JSON_BODY -> prints "HTTP_STATUS\nBODY"
+            curl -sS -w '\n%{http_code}' -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "$1"
           }
+          auth_error() {
+            # returns 0 if the body looks like an authorization failure
+            echo "$1" | grep -qiE 'not authorized|unauthorized|problem processing request'
+          }
+
+          echo "Probing Railway GraphQL with 'me' query..."
+          RESP="$(probe '{"query":"query { me { email } }"}')"
+          CODE="$(echo "$RESP" | tail -n1)"
+          BODY="$(echo "$RESP" | sed '$d')"
+          echo "  HTTP $CODE"
+
+          if [ "$CODE" = "200" ] && ! auth_error "$BODY"; then
+            echo "::notice::Railway token verified via GraphQL (me)."
+            exit 0
+          fi
+
+          # Team tokens may not resolve 'me' — fall back to a projects query.
+          echo "'me' query did not confirm auth; falling back to 'projects' query..."
+          RESP="$(probe '{"query":"query { projects { edges { node { id name } } } }"}')"
+          CODE="$(echo "$RESP" | tail -n1)"
+          BODY="$(echo "$RESP" | sed '$d')"
+          echo "  HTTP $CODE"
+
+          if [ "$CODE" = "200" ] && ! auth_error "$BODY"; then
+            echo "::notice::Railway token verified via GraphQL (projects)."
+            exit 0
+          fi
+
+          echo "::error::Railway token failed GraphQL auth check (HTTP $CODE)."
+          echo "$BODY" | sed 's/Bearer [^"]*/Bearer ***/g' | head -c 500
+          exit 1
 
       # -- Ensure a Railway project named modn-website exists -----------------
       - name: Ensure Railway project exists
@@ -321,39 +358,67 @@ jobs:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ steps.project.outputs.project_id }}
           RAILWAY_ENVIRONMENT_ID: ${{ steps.environment.outputs.environment_id }}
+          RAILWAY_SERVICE_ID: ${{ steps.service.outputs.service_id }}
         run: |
           set -euo pipefail
-          echo "Linking Railway project/service..."
-          railway link --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --service "$RAILWAY_BACKEND_SERVICE" \
-            || railway link --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_BACKEND_SERVICE" \
-            || true
-          echo "Uploading build context and deploying (streams the build)..."
+          # A workspace/team token in RAILWAY_API_TOKEN can only drive the CLI
+          # once the working directory is linked to a specific project /
+          # environment / service. Link non-interactively by IDs (not names) so
+          # 'railway up' knows exactly where to deploy.
+          echo "Linking Railway project=$RAILWAY_PROJECT_ID env=$RAILWAY_ENVIRONMENT_ID service=$RAILWAY_SERVICE_ID ..."
+          # Current CLI flags: --project/-p, --environment/-e, --service/-s.
+          railway link --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --service "$RAILWAY_SERVICE_ID" \
+            || railway link -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT_ID" -s "$RAILWAY_SERVICE_ID" \
+            || railway link --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID"
+          echo "Uploading build context and deploying in CI mode..."
           # railway up builds from backend/ using apps/backend/Dockerfile (railway.json).
-          railway up --service "$RAILWAY_BACKEND_SERVICE" --detach
+          # --ci: non-interactive, exits after upload without streaming forever.
+          railway up --ci --service "$RAILWAY_SERVICE_ID"
 
       # -- Ensure a public domain and capture it -----------------------------
       - name: Ensure backend public domain
         id: backend_url
-        working-directory: backend
         env:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-          RAILWAY_PROJECT_ID: ${{ steps.project.outputs.project_id }}
-          RAILWAY_ENVIRONMENT_ID: ${{ steps.environment.outputs.environment_id }}
+          PROJECT_ID: ${{ steps.project.outputs.project_id }}
+          ENV_ID: ${{ steps.environment.outputs.environment_id }}
+          SVC_ID: ${{ steps.service.outputs.service_id }}
         run: |
           set -uo pipefail
-          echo "Requesting a public domain for the backend service..."
-          # 'railway domain' is idempotent: prints the existing domain or creates one.
-          OUT="$(railway domain --service "$RAILWAY_BACKEND_SERVICE" 2>&1 || true)"
-          echo "$OUT"
-          URL="$(echo "$OUT" | grep -oE 'https?://[A-Za-z0-9.-]+' | head -n1)"
-          if [ -z "$URL" ]; then
-            HOST="$(echo "$OUT" | grep -oE '[A-Za-z0-9.-]+\.up\.railway\.app' | head -n1)"
-            if [ -n "$HOST" ]; then URL="https://$HOST"; fi
+          # Create/read the public domain via GraphQL rather than the 'railway
+          # domain' CLI, which is fragile with a workspace/team token.
+          gql() {
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" --data "$1"
+          }
+          scrub() { sed 's/Bearer [^"]*/Bearer ***/g'; }
+
+          echo "Reading existing domains for the backend service..."
+          Q_BODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$SVC_ID" \
+            '{query:"query($p:String!,$e:String!,$s:String!){ domains(projectId:$p, environmentId:$e, serviceId:$s){ serviceDomains { domain } customDomains { domain } } }", variables:{p:$p,e:$e,s:$s}}')"
+          RESP="$(gql "$Q_BODY")"
+          HOST="$(echo "$RESP" | jq -r '.data.domains.serviceDomains[0].domain // ""')"
+
+          if [ -z "$HOST" ]; then
+            echo "No existing service domain — creating one via serviceDomainCreate..."
+            M_BODY="$(jq -n --arg e "$ENV_ID" --arg s "$SVC_ID" \
+              '{query:"mutation($input: ServiceDomainCreateInput!){ serviceDomainCreate(input:$input){ domain } }", variables:{input:{environmentId:$e, serviceId:$s}}}')"
+            RESP="$(gql "$M_BODY")"
+            if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
+              echo "::error::serviceDomainCreate failed."
+              echo "$RESP" | scrub | head -c 500
+              exit 1
+            fi
+            HOST="$(echo "$RESP" | jq -r '.data.serviceDomainCreate.domain // ""')"
           fi
-          if [ -z "$URL" ]; then
-            echo "::error::Could not determine backend public domain from 'railway domain' output."
+
+          if [ -z "$HOST" ]; then
+            echo "::error::Could not determine backend public domain from the Railway API."
+            echo "$RESP" | scrub | head -c 500
             exit 1
           fi
+          URL="https://$HOST"
           echo "backend_url=$URL" >> "$GITHUB_OUTPUT"
           echo "::notice::Backend URL = $URL"
 

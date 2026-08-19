@@ -4,8 +4,19 @@ import Medusa, { FetchArgs, FetchInput } from "@medusajs/js-sdk"
 // Defaults to standard port for Medusa server
 let MEDUSA_BACKEND_URL = "http://localhost:9000"
 
-if (process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL) {
-  MEDUSA_BACKEND_URL = process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL
+// Guarantee a valid absolute URL: the Medusa JS SDK does `new URL(baseUrl)` on
+// every request, so a value missing a scheme (or otherwise malformed) throws
+// "Invalid URL" and crashes the production build while collecting page data.
+const rawBackendUrl = process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL
+if (rawBackendUrl) {
+  const candidate = /^https?:\/\//i.test(rawBackendUrl)
+    ? rawBackendUrl
+    : `https://${rawBackendUrl}`
+  try {
+    MEDUSA_BACKEND_URL = new URL(candidate).origin
+  } catch {
+    MEDUSA_BACKEND_URL = "http://localhost:9000"
+  }
 }
 
 export const sdk = new Medusa({

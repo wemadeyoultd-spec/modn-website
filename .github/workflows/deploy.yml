@@ -943,6 +943,11 @@ jobs:
           set -euo pipefail
           echo "Pulling production project settings..."
           vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
+          # Diagnostics: show the two PUBLIC storefront URL vars actually pulled
+          # (never the publishable/stripe keys) to catch a malformed URL that
+          # would crash `next build` with "Invalid URL".
+          echo "Resolved public URL env (from pulled production env):"
+          grep -E '^NEXT_PUBLIC_(MEDUSA_BACKEND_URL|BASE_URL)=' .vercel/.env.production.local 2>/dev/null || echo "  (none found in pulled env)"
           echo "Building (prod)..."
           vercel build --prod --token "$VERCEL_TOKEN"
           echo "Deploying prebuilt output to production..."

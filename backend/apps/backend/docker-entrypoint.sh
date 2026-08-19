@@ -29,38 +29,52 @@ wait_for_postgres() {
   [ -z "$port" ] && port=5432
   [ -z "$host" ] && { echo "[entrypoint] Could not parse host from DATABASE_URL; skipping DB wait."; return 0; }
 
-  echo "[entrypoint] Waiting for Postgres at ${host}:${port} (up to ~90s)..."
+  # Diagnostics: show whether the DB host resolves over Railway's private
+  # network. `.railway.internal` names are IPv6-only and may take a few seconds
+  # to resolve after the container starts.
+  echo "[entrypoint] DNS lookup for ${host}:"
+  getent hosts "$host" 2>/dev/null || echo "  (no DNS resolution yet for ${host})"
+
+  # Probe TCP with node (always present in this image) — pg_isready/nc are not
+  # installed and dash has no /dev/tcp. Up to ~180s so a slow Postgres first
+  # boot or a private-network warm-up does not fail the deploy.
+  echo "[entrypoint] Waiting for Postgres at ${host}:${port} (up to ~180s)..."
   i=0
-  while [ "$i" -lt 45 ]; do
-    if command -v pg_isready >/dev/null 2>&1; then
-      pg_isready -h "$host" -p "$port" >/dev/null 2>&1 && { echo "[entrypoint] Postgres is ready."; return 0; }
-    elif command -v nc >/dev/null 2>&1; then
-      nc -z "$host" "$port" >/dev/null 2>&1 && { echo "[entrypoint] Postgres port is open."; return 0; }
-    else
-      # No probe tool: try a bash-style TCP check, else just wait out the loop.
-      (exec 3<>"/dev/tcp/${host}/${port}") >/dev/null 2>&1 && { echo "[entrypoint] Postgres port is open (tcp)."; return 0; }
+  while [ "$i" -lt 60 ]; do
+    if node -e '
+      const net = require("net");
+      const s = net.connect({ host: process.argv[1], port: +process.argv[2] }, () => { s.end(); process.exit(0); });
+      s.setTimeout(3000, () => { s.destroy(); process.exit(1); });
+      s.on("error", () => process.exit(1));
+    ' "$host" "$port" >/dev/null 2>&1; then
+      echo "[entrypoint] Postgres TCP port ${host}:${port} is open."
+      return 0
     fi
     i=$((i + 1))
-    sleep 2
+    [ $((i % 5)) -eq 0 ] && echo "[entrypoint] ...still waiting for ${host}:${port} (${i}/60)"
+    sleep 3
   done
-  echo "[entrypoint] Postgres not confirmed ready after wait; proceeding anyway (migrate will retry)."
+  echo "[entrypoint] Postgres not reachable after wait. Final DNS state:"
+  getent hosts "$host" 2>/dev/null || echo "  (still no DNS resolution for ${host})"
+  echo "[entrypoint] Proceeding anyway (migrate will retry)."
   return 0
 }
 
 wait_for_postgres
 
 echo "[entrypoint] Running database migrations..."
-# Retry migrations a few times in case Postgres is still finishing startup.
+# Retry migrations for a while in case Postgres is still finishing startup or
+# the private network is still warming up (~10 attempts x 15s ≈ 2.5m).
 migrate_ok=0
 i=0
-while [ "$i" -lt 5 ]; do
+while [ "$i" -lt 10 ]; do
   if npx medusa db:migrate; then
     migrate_ok=1
     break
   fi
   i=$((i + 1))
-  echo "[entrypoint] Migration attempt $i failed; retrying in 10s..."
-  sleep 10
+  echo "[entrypoint] Migration attempt $i failed; retrying in 15s..."
+  sleep 15
 done
 if [ "$migrate_ok" -ne 1 ]; then
   echo "[entrypoint] Migrations failed after retries."

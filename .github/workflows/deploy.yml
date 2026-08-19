@@ -130,7 +130,11 @@ jobs:
           scrub() { sed 's/Bearer [^"]*/Bearer ***/g'; }
 
           echo "Querying existing projects..."
-          RESP="$(gql '{"query":"query { me { projects { edges { node { id name } } } } }"}')"
+          # Use the top-level `projects` query (not `me { projects }`): team /
+          # workspace tokens cannot resolve the user-bound `me` field but CAN
+          # read top-level fields such as `projects`. Also pull each project's
+          # teamId so we can scope a projectCreate to the token's team below.
+          RESP="$(gql '{"query":"query { projects { edges { node { id name teamId } } } }"}')"
           if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
             echo "::error::Railway GraphQL returned errors while listing projects."
             echo "$RESP" | scrub
@@ -138,14 +142,29 @@ jobs:
           fi
 
           PROJECT_ID="$(echo "$RESP" | jq -r --arg n "$RAILWAY_PROJECT_NAME" \
-            '[.data.me.projects.edges[].node | select(.name==$n) | .id][0] // ""')"
+            '[.data.projects.edges[].node | select(.name==$n) | .id][0] // ""')"
+
+          # Derive the team/workspace id from any existing project so a new
+          # project can be created inside the team token's workspace. Team
+          # tokens require projectCreate to be scoped to their team.
+          TEAM_ID="$(echo "$RESP" | jq -r \
+            '[.data.projects.edges[].node.teamId | select(. != null and . != "")][0] // ""')"
 
           if [ -n "$PROJECT_ID" ]; then
             echo "::notice::Found existing project $RAILWAY_PROJECT_NAME ($PROJECT_ID)"
           else
             echo "Project not found — creating $RAILWAY_PROJECT_NAME..."
-            BODY="$(jq -n --arg n "$RAILWAY_PROJECT_NAME" \
-              '{query:"mutation projectCreate($input: ProjectCreateInput!){ projectCreate(input:$input){ id name } }", variables:{input:{name:$n}}}')"
+            if [ -n "$TEAM_ID" ]; then
+              echo "Scoping projectCreate to team $TEAM_ID"
+              BODY="$(jq -n --arg n "$RAILWAY_PROJECT_NAME" --arg t "$TEAM_ID" \
+                '{query:"mutation projectCreate($input: ProjectCreateInput!){ projectCreate(input:$input){ id name } }", variables:{input:{name:$n, teamId:$t}}}')"
+            else
+              # No existing project to derive a team from. Attempt an unscoped
+              # create; if the team token rejects it for a missing teamId the
+              # error below will make that explicit.
+              BODY="$(jq -n --arg n "$RAILWAY_PROJECT_NAME" \
+                '{query:"mutation projectCreate($input: ProjectCreateInput!){ projectCreate(input:$input){ id name } }", variables:{input:{name:$n}}}')"
+            fi
             RESP="$(gql "$BODY")"
             if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
               echo "::error::Failed to create Railway project."

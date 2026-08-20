@@ -33,6 +33,13 @@ on:
           - "false"
           - "true"
         default: "false"
+      repro_admin:
+        description: "Build the admin on the runner and browser-test it locally (offline repro + bisect of the blank /app)."
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
 
 concurrency:
   group: diagnose-production
@@ -353,4 +360,126 @@ jobs:
         with:
           name: admin-screenshot
           path: admin.jpg
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # OFFLINE ADMIN RENDER REPRO + BISECT (gated by repro_admin=true).
+  # Builds the admin from the repo source ON the runner, serves the static admin
+  # output at /app on localhost, and browser-tests it — reproducing the blank
+  # /app without any Railway deploy. Then rebuilds with the custom admin
+  # extensions (src/admin/widgets + src/admin/i18n) removed and re-tests, to
+  # prove whether that custom code is the cause of the React render crash.
+  # ---------------------------------------------------------------------------
+  render-repro:
+    name: Offline admin render repro + bisect
+    if: ${{ github.event.inputs.repro_admin == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        working-directory: backend
+        run: npm ci
+
+      - name: Install Playwright chromium
+        working-directory: backend/apps/backend
+        run: |
+          npm i playwright@latest --no-save
+          npx playwright install --with-deps chromium
+
+      - name: Write shared render-check script
+        run: |
+          cat > /tmp/render-check.mjs <<'EOF'
+          import { chromium } from 'playwright';
+          const URL = process.argv[2];
+          const LABEL = process.argv[3] || 'check';
+          const consoleMsgs = [], pageErrors = [];
+          const browser = await chromium.launch();
+          const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+          page.on('console', m => consoleMsgs.push(`[${m.type()}] ${m.text()}`));
+          page.on('pageerror', e => pageErrors.push(String(e && e.stack || e)));
+          try { await page.goto(URL, { waitUntil: 'networkidle', timeout: 45000 }); }
+          catch (e) { pageErrors.push('goto: ' + String(e)); }
+          await page.waitForTimeout(7000);
+          const bodyText = await page.evaluate(() => document.body ? document.body.innerText : '(no body)');
+          const probe = await page.evaluate(() => ({
+            emailInputs: document.querySelectorAll('input[type=email],input[name=email]').length,
+            passwordInputs: document.querySelectorAll('input[type=password],input[name=password]').length,
+            totalInputs: document.querySelectorAll('input').length,
+            buttons: document.querySelectorAll('button').length,
+            rootChildren: (document.getElementById('medusa') || document.body).children.length,
+          }));
+          await page.screenshot({ path: `admin-${LABEL}.jpg`, type: 'jpeg', quality: 55 });
+          const rendered = probe.passwordInputs > 0 && bodyText.length > 20;
+          console.log(`===== [${LABEL}] URL ${URL}`);
+          console.log(`[${LABEL}] BODY_LEN=${bodyText.length} PROBE=${JSON.stringify(probe)}`);
+          console.log(`[${LABEL}] VERDICT=${rendered ? 'RENDERED_LOGIN' : 'BLANK_OR_NO_LOGIN'}`);
+          console.log(`[${LABEL}] BODY_TEXT(0..200)=${bodyText.slice(0,200).replace(/\n/g,' ')}`);
+          console.log(`[${LABEL}] PAGE_ERRORS(${pageErrors.length}):`);
+          pageErrors.forEach(m => console.log('  ' + m.split('\n')[0]));
+          const reactChild = [...consoleMsgs, ...pageErrors].some(m => /not valid as a React child/.test(m));
+          console.log(`[${LABEL}] REACT_CHILD_ERROR=${reactChild}`);
+          console.log(`[${LABEL}] CONSOLE_ERRORS:`);
+          consoleMsgs.filter(m => m.startsWith('[error]')).forEach(m => console.log('  ' + m.split('\n')[0]));
+          await browser.close();
+          EOF
+          echo "wrote /tmp/render-check.mjs"
+
+      - name: Serve helper
+        run: |
+          cat > /tmp/serve.mjs <<'EOF'
+          import http from 'http';
+          import { readFile, stat } from 'fs/promises';
+          import { extname, join, normalize } from 'path';
+          const ROOT = process.argv[2]; const PORT = +process.argv[3];
+          const TYPES = { '.js':'text/javascript','.css':'text/css','.html':'text/html','.json':'application/json','.ttf':'font/ttf','.svg':'image/svg+xml','.png':'image/png','.ico':'image/x-icon','.woff':'font/woff','.woff2':'font/woff2' };
+          // Static admin lives at ROOT and is referenced under /app. Map /app -> ROOT.
+          http.createServer(async (req, res) => {
+            try {
+              let p = decodeURIComponent(req.url.split('?')[0]);
+              if (p.startsWith('/app')) p = p.slice(4) || '/';
+              let fp = normalize(join(ROOT, p));
+              try { const s = await stat(fp); if (s.isDirectory()) fp = join(fp, 'index.html'); }
+              catch { fp = join(ROOT, 'index.html'); } // SPA fallback
+              const buf = await readFile(fp);
+              res.writeHead(200, { 'content-type': TYPES[extname(fp)] || 'application/octet-stream' });
+              res.end(buf);
+            } catch { res.writeHead(404); res.end('nf'); }
+          }).listen(PORT, () => console.log('serving', ROOT, 'on', PORT));
+          EOF
+          echo "wrote /tmp/serve.mjs"
+
+      - name: Build A (current source) + render test
+        working-directory: backend/apps/backend
+        run: |
+          set -uo pipefail
+          npx medusa build
+          rm -rf /tmp/adminA && cp -r .medusa/server/public/admin /tmp/adminA
+          node /tmp/serve.mjs /tmp/adminA 8081 &
+          sleep 2
+          node /tmp/render-check.mjs "http://localhost:8081/app" A || true
+
+      - name: Build B (custom admin extensions removed) + render test
+        working-directory: backend/apps/backend
+        run: |
+          set -uo pipefail
+          rm -rf src/admin/widgets src/admin/i18n
+          npx medusa build
+          rm -rf /tmp/adminB && cp -r .medusa/server/public/admin /tmp/adminB
+          node /tmp/serve.mjs /tmp/adminB 8082 &
+          sleep 2
+          node /tmp/render-check.mjs "http://localhost:8082/app" B || true
+
+      - name: Upload repro screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-screenshots
+          path: backend/apps/backend/admin-*.jpg
           if-no-files-found: warn

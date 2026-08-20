@@ -11,24 +11,31 @@ FROM node:22-slim AS builder
 
 WORKDIR /app
 
-# Copy only manifests first for better layer caching. All workspace package.json
-# files must be present so `npm ci` can resolve the workspaces graph.
+# Copy only the manifests needed to build the backend (the storefront manifest
+# is intentionally omitted — see below).
 COPY package.json package-lock.json turbo.json ./
 COPY apps/backend/package.json ./apps/backend/package.json
-COPY apps/storefront/package.json ./apps/storefront/package.json
 
-# The storefront (Next.js 15) depends on react@19, which npm hoists to the root
-# node_modules of this workspace install. The Medusa admin dashboard renders
-# with react@18. React 19 changed the internal element `$$typeof` symbol, so the
-# admin's React-18 elements are seen as plain objects by the reconciler and the
-# admin crashes at runtime with "Objects are not valid as a React child",
-# leaving /app blank (HTTP 200 shell, nothing rendered). This image only builds
-# and runs the BACKEND (the storefront is deployed separately on Vercel), so pin
-# react/react-dom to 18.3.1 for the image install. That guarantees a single
-# React 18 in the admin bundle. The committed repo and the Vercel storefront
-# build are untouched, so the storefront keeps React 19.
-RUN npm pkg set overrides.react=18.3.1 overrides.react-dom=18.3.1 \
- && npm install --no-audit --no-fund
+# This image builds and runs ONLY the Medusa backend; the Next.js storefront is
+# deployed separately on Vercel. The storefront depends on react@19, which npm
+# hoists into the shared workspace node_modules and collides with the react@18
+# that the admin dashboard renders with. React 19 changed the internal element
+# `$$typeof` symbol, so the admin's React-18 elements are seen as plain objects
+# by the reconciler and the admin crashes at runtime ("Objects are not valid as
+# a React child") — /app returns its HTML shell (HTTP 200) but renders blank.
+#
+# Restrict the workspace install to apps/backend and re-resolve from scratch so
+# ONLY a single react@18 is present when `medusa build` bundles the admin. A
+# root `overrides` pin was tried first and did NOT work (npm keeps the locked
+# react@19), so the storefront is excluded from the install entirely. The
+# committed repo and the Vercel storefront build are untouched (storefront keeps
+# React 19). The later `COPY . .` restores the original manifests, but the
+# backend-only node_modules is already resolved and `medusa build` does not
+# reinstall.
+RUN node -e "const fs=require('fs');const p=require('./package.json');p.workspaces=['apps/backend'];fs.writeFileSync('package.json',JSON.stringify(p,null,2))" \
+ && rm -f package-lock.json \
+ && npm install --no-audit --no-fund \
+ && node -e "console.log('resolved root react =', require('react/package.json').version)"
 
 # Copy the rest of the source and build the backend (compiles server + admin
 # into apps/backend/.medusa/server).

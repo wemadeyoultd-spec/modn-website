@@ -466,14 +466,16 @@ jobs:
           sleep 2
           node render-check.mjs "http://localhost:8081/app" CONTROL || true
 
-      - name: FIX — pin react/react-dom to 18.3.1 (as Dockerfile does) renders login
+      - name: FIX — backend-only install (as Dockerfile does) renders login
         working-directory: backend
         run: |
           set -uo pipefail
-          npm pkg set overrides.react=18.3.1 overrides.react-dom=18.3.1
+          # Replicate the Dockerfile: restrict workspaces to apps/backend, drop
+          # the storefront + lock, and re-resolve so only react@18 is installed.
+          node -e "const fs=require('fs');const p=require('./package.json');p.workspaces=['apps/backend'];fs.writeFileSync('package.json',JSON.stringify(p,null,2))"
+          rm -f package-lock.json
           npm install --no-audit --no-fund
           echo "root react = $(node -p "require('./node_modules/react/package.json').version" 2>/dev/null || echo '?')"
-          # medusa build's admin bundle must now contain a single react@18.
           cd apps/backend
           npm i playwright@latest --no-save
           npx medusa build

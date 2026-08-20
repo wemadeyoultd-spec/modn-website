@@ -29,6 +29,10 @@ out/
 .turbo/
 .vercel/
 
+# Runtime artifacts (Redis dumps, etc.)
+dump.rdb
+*.rdb
+
 # Test coverage
 coverage/
 

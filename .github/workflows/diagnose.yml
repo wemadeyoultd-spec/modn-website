@@ -383,7 +383,7 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install deps (as the Docker build does: react@19 hoisted)
+      - name: "Install deps (as the Docker build does; react@19 hoisted)"
         working-directory: backend
         run: npm ci
 

@@ -178,7 +178,6 @@ jobs:
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           DISABLE_PROT: ${{ github.event.inputs.disable_vercel_protection }}
-        working-directory: backend/apps/storefront
         run: |
           set -uo pipefail
           npm i -g vercel@latest >/dev/null 2>&1 || npm i -g vercel@latest

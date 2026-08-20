@@ -1,0 +1,257 @@
+name: Diagnose
+
+# Manual diagnostics + targeted fixes for the live deployment, run from GitHub's
+# network (the local dev sandbox has no egress). Reports the live status of the
+# Railway backend, the Vercel storefront, and the Cloudflare-managed public
+# domain, and can apply a few safe fixes gated by the inputs below.
+on:
+  workflow_dispatch:
+    inputs:
+      fix_seed_vars:
+        description: "Force RUN_SEED=false and RESET_DB=false on the backend service (stops re-seed/wipe on restart)."
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "true"
+      set_admin:
+        description: "Admin password bootstrap flag on the backend service."
+        type: choice
+        options:
+          - "no"       # leave SET_ADMIN untouched
+          - "enable"   # SET_ADMIN=true (+ADMIN creds) so the next boot sets the password
+          - "disable"  # SET_ADMIN=false after the password has been set
+        default: "no"
+      admin_password:
+        description: "Password to bootstrap for admin@medusa.local when set_admin=enable."
+        required: false
+        default: "1212"
+      disable_vercel_protection:
+        description: "Disable Vercel Deployment Protection (SSO/password) on production so the public can view the site."
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
+
+concurrency:
+  group: diagnose-production
+  cancel-in-progress: false
+
+env:
+  RAILWAY_PROJECT_NAME: modn-website
+  RAILWAY_BACKEND_SERVICE: backend
+  RAILWAY_GRAPHQL: https://backboard.railway.com/graphql/v2
+  VERCEL_PROJECT_NAME: modn-storefront
+  PUBLIC_DOMAIN: kr.respectathletic.com
+
+jobs:
+  diagnose:
+    name: Diagnose live deployment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # ---------------------------------------------------------------------
+      # RAILWAY: resolve ids, report deployment status + variables + logs, and
+      # apply the seed/admin variable fixes.
+      # ---------------------------------------------------------------------
+      - name: Railway diagnose + fix
+        id: railway
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          FIX_SEED: ${{ github.event.inputs.fix_seed_vars }}
+          SET_ADMIN_MODE: ${{ github.event.inputs.set_admin }}
+          ADMIN_PW: ${{ github.event.inputs.admin_password }}
+        run: |
+          set -uo pipefail
+          gql() {
+            curl -sS -X POST "$RAILWAY_GRAPHQL" \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" --data "$1"
+          }
+          scrub() { sed 's/Bearer [^"]*/Bearer ***/g'; }
+
+          echo "== Resolving project / environment / backend service =="
+          RESP="$(gql '{"query":"query { projects { edges { node { id name } } } }"}')"
+          PROJECT_ID="$(echo "$RESP" | jq -r --arg n "$RAILWAY_PROJECT_NAME" '[.data.projects.edges[].node | select(.name==$n) | .id][0] // ""')"
+          if [ -z "$PROJECT_ID" ]; then
+            echo "::error::Could not resolve Railway project $RAILWAY_PROJECT_NAME."
+            echo "$RESP" | scrub | head -c 500; exit 1
+          fi
+          PBODY="$(jq -n --arg id "$PROJECT_ID" '{query:"query($id: String!){ project(id:$id){ environments { edges { node { id name } } } services { edges { node { id name } } } } }", variables:{id:$id}}')"
+          PROJ="$(gql "$PBODY")"
+          ENV_ID="$(echo "$PROJ" | jq -r '[.data.project.environments.edges[].node | select(.name=="production") | .id][0] // .data.project.environments.edges[0].node.id // ""')"
+          SVC_ID="$(echo "$PROJ" | jq -r --arg n "$RAILWAY_BACKEND_SERVICE" '[.data.project.services.edges[].node | select(.name==$n) | .id][0] // ""')"
+          echo "project=$PROJECT_ID env=$ENV_ID backend=$SVC_ID"
+          [ -z "$ENV_ID" ] || [ -z "$SVC_ID" ] && { echo "::error::Missing env or backend service id."; exit 1; }
+
+          echo ""
+          echo "== Current backend service variables (seed/admin flags) =="
+          VBODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$SVC_ID" '{query:"query($p:String!,$e:String!,$s:String!){ variables(projectId:$p, environmentId:$e, serviceId:$s) }", variables:{p:$p,e:$e,s:$s}}')"
+          VARS="$(gql "$VBODY" | jq '.data.variables // {}')"
+          echo "$VARS" > vars.json
+          echo "  RUN_SEED   = $(echo "$VARS" | jq -r '.RUN_SEED   // "(unset)"')"
+          echo "  RESET_DB   = $(echo "$VARS" | jq -r '.RESET_DB   // "(unset)"')"
+          echo "  SET_ADMIN  = $(echo "$VARS" | jq -r '.SET_ADMIN  // "(unset)"')"
+          echo "  ADMIN_EMAIL= $(echo "$VARS" | jq -r '.ADMIN_EMAIL // "(unset)"')"
+
+          echo ""
+          echo "== Latest backend deployment status =="
+          DBODY="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$SVC_ID" '{query:"query($p:String!,$e:String!,$s:String!){ deployments(first:3, input:{projectId:$p, environmentId:$e, serviceId:$s}){ edges { node { id status createdAt } } } }", variables:{p:$p,e:$e,s:$s}}')"
+          DRESP="$(gql "$DBODY")"
+          echo "$DRESP" | jq -r '.data.deployments.edges[]?.node | "  \(.createdAt)  \(.status)  \(.id)"' 2>/dev/null || echo "$DRESP" | scrub | head -c 400
+          DEP_ID="$(echo "$DRESP" | jq -r '.data.deployments.edges[0].node.id // ""')"
+          DEP_STATUS="$(echo "$DRESP" | jq -r '.data.deployments.edges[0].node.status // ""')"
+          echo "  -> latest status: $DEP_STATUS"
+
+          if [ -n "$DEP_ID" ]; then
+            echo ""
+            echo "== Backend runtime logs (tail) =="
+            LBODY="$(jq -n --arg d "$DEP_ID" '{query:"query($d:String!){ deploymentLogs(deploymentId:$d, limit:200){ message severity } }", variables:{d:$d}}')"
+            gql "$LBODY" | jq -r '.data.deploymentLogs[]?.message // empty' 2>/dev/null | tail -n 120 || true
+          fi
+
+          # -- Apply fixes ----------------------------------------------------
+          upsert() {
+            local NAME="$1"; local VALUE="$2"
+            local B RESP
+            B="$(jq -n --arg p "$PROJECT_ID" --arg e "$ENV_ID" --arg s "$SVC_ID" --arg name "$NAME" --arg value "$VALUE" '{query:"mutation($input: VariableUpsertInput!){ variableUpsert(input:$input) }", variables:{input:{projectId:$p, environmentId:$e, serviceId:$s, name:$name, value:$value}}}')"
+            RESP="$(gql "$B")"
+            if echo "$RESP" | jq -e '.errors' >/dev/null 2>&1; then
+              echo "::error::Failed to set $NAME"; echo "$RESP" | scrub; exit 1
+            fi
+            echo "  set $NAME=$VALUE"
+          }
+
+          if [ "${FIX_SEED:-false}" = "true" ]; then
+            echo ""
+            echo "== Forcing RUN_SEED=false, RESET_DB=false =="
+            upsert RUN_SEED "false"
+            upsert RESET_DB "false"
+          fi
+
+          if [ "${SET_ADMIN_MODE:-no}" = "enable" ]; then
+            echo ""
+            echo "== Enabling SET_ADMIN bootstrap (admin@medusa.local) =="
+            upsert ADMIN_EMAIL "admin@medusa.local"
+            upsert ADMIN_PASSWORD "${ADMIN_PW:-1212}"
+            upsert SET_ADMIN "true"
+          elif [ "${SET_ADMIN_MODE:-no}" = "disable" ]; then
+            echo ""
+            echo "== Disabling SET_ADMIN bootstrap =="
+            upsert SET_ADMIN "false"
+          fi
+
+          {
+            echo "backend_status=$DEP_STATUS"
+          } >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------------
+      # Public backend endpoints from the GitHub runner.
+      # ---------------------------------------------------------------------
+      - name: Curl backend /health and /app
+        run: |
+          set -uo pipefail
+          BASE="https://backend-production-93dc.up.railway.app"
+          probe() {
+            local URL="$1"
+            local CODE
+            CODE="$(curl -s -m 20 -o body.out -w '%{http_code}' "$URL" || echo 000)"
+            echo "----- GET $URL -> HTTP $CODE -----"
+            head -c 400 body.out 2>/dev/null; echo ""
+          }
+          probe "$BASE/health"
+          probe "$BASE/app"
+
+      # ---------------------------------------------------------------------
+      # VERCEL: production URL, deployment protection status, optional disable.
+      # ---------------------------------------------------------------------
+      - name: Vercel diagnose + protection
+        id: vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          DISABLE_PROT: ${{ github.event.inputs.disable_vercel_protection }}
+        working-directory: backend/apps/storefront
+        run: |
+          set -uo pipefail
+          npm i -g vercel@latest >/dev/null 2>&1 || npm i -g vercel@latest
+          echo "== Linking Vercel project (read-only) =="
+          vercel link --yes --project "$VERCEL_PROJECT_NAME" --token "$VERCEL_TOKEN" >/dev/null 2>&1 || true
+          ORG_ID=""; PROJ_ID=""
+          if [ -f .vercel/project.json ]; then
+            ORG_ID="$(jq -r '.orgId' .vercel/project.json)"
+            PROJ_ID="$(jq -r '.projectId' .vercel/project.json)"
+          fi
+          echo "org=$ORG_ID project=$PROJ_ID"
+          TEAM_Q=""
+          case "$ORG_ID" in team_*) TEAM_Q="&teamId=${ORG_ID}";; esac
+          api() { curl -sS -H "Authorization: Bearer ${VERCEL_TOKEN}" "$@"; }
+
+          echo ""
+          echo "== Deployment Protection status =="
+          PROJ="$(api "https://api.vercel.com/v9/projects/${PROJ_ID}?x=1${TEAM_Q}")"
+          echo "  ssoProtection      = $(echo "$PROJ" | jq -c '.ssoProtection // null')"
+          echo "  passwordProtection = $(echo "$PROJ" | jq -c '.passwordProtection // null')"
+
+          if [ "${DISABLE_PROT:-false}" = "true" ]; then
+            echo ""
+            echo "== Disabling Deployment Protection (ssoProtection+passwordProtection=null) =="
+            RESP="$(curl -sS -X PATCH -H "Authorization: Bearer ${VERCEL_TOKEN}" -H "Content-Type: application/json" \
+              --data '{"ssoProtection":null,"passwordProtection":null}' \
+              "https://api.vercel.com/v9/projects/${PROJ_ID}?x=1${TEAM_Q}")"
+            echo "  ssoProtection      = $(echo "$RESP" | jq -c '.ssoProtection // null')"
+            echo "  passwordProtection = $(echo "$RESP" | jq -c '.passwordProtection // null')"
+          fi
+
+          echo ""
+          echo "== Latest READY production deployment =="
+          DEPS="$(api "https://api.vercel.com/v6/deployments?projectId=${PROJ_ID}&target=production&limit=3${TEAM_Q}")"
+          PROD_URL="$(echo "$DEPS" | jq -r '[.deployments[]? | select(.state=="READY")][0].url // .deployments[0].url // ""')"
+          echo "  production deployment host: ${PROD_URL:-(none)}"
+          if [ -n "$PROD_URL" ]; then
+            CODE="$(curl -s -m 25 -o vbody.out -w '%{http_code}' "https://${PROD_URL}" || echo 000)"
+            echo "----- GET https://${PROD_URL} -> HTTP $CODE -----"
+            head -c 300 vbody.out; echo ""
+          fi
+
+      # ---------------------------------------------------------------------
+      # CLOUDFLARE + public domain: DNS record + SSL/HTTP status.
+      # ---------------------------------------------------------------------
+      - name: Cloudflare DNS + public domain
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -uo pipefail
+          ZONE="respectathletic.com"
+          api() { curl -sS -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" "$@"; }
+          echo "== Cloudflare DNS for ${PUBLIC_DOMAIN} =="
+          ZID="$(api "https://api.cloudflare.com/client/v4/zones?name=${ZONE}" | jq -r '.result[0].id // ""')"
+          if [ -z "$ZID" ]; then
+            echo "::warning::Zone ${ZONE} not found or token not scoped."
+          else
+            api "https://api.cloudflare.com/client/v4/zones/${ZID}/dns_records?name=${PUBLIC_DOMAIN}" \
+              | jq -r '.result[]? | "  \(.type)  \(.name) -> \(.content)  (proxied=\(.proxied))"'
+          fi
+          echo ""
+          echo "== Public resolution + SSL =="
+          echo "  DNS: $(getent hosts "$PUBLIC_DOMAIN" || echo '(no resolution)')"
+          CODE="$(curl -s -m 25 -o kbody.out -w '%{http_code}' "https://${PUBLIC_DOMAIN}" 2>curlerr.out || echo 000)"
+          echo "----- GET https://${PUBLIC_DOMAIN} -> HTTP $CODE -----"
+          if [ "$CODE" = "000" ]; then echo "  curl error: $(head -c 200 curlerr.out)"; fi
+          head -c 300 kbody.out 2>/dev/null; echo ""
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Diagnose run"
+            echo "- Backend latest deployment status: ${{ steps.railway.outputs.backend_status }}"
+            echo "- See step logs above for /health, /app, Vercel production, and ${PUBLIC_DOMAIN} results."
+          } >> "$GITHUB_STEP_SUMMARY"

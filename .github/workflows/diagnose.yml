@@ -466,16 +466,17 @@ jobs:
           sleep 2
           node render-check.mjs "http://localhost:8081/app" CONTROL || true
 
-      - name: FIX — backend-only install (as Dockerfile does) renders login
+      - name: FIX — backend-only + react override (as Dockerfile does) renders login
         working-directory: backend
         run: |
           set -uo pipefail
-          # Replicate the Dockerfile: restrict workspaces to apps/backend, drop
-          # the storefront + lock, and re-resolve so only react@18 is installed.
-          node -e "const fs=require('fs');const p=require('./package.json');p.workspaces=['apps/backend'];fs.writeFileSync('package.json',JSON.stringify(p,null,2))"
-          rm -f package-lock.json
+          # Faithfully simulate the Docker builder's CLEAN layer: wipe any
+          # node_modules from the CONTROL step so npm fully re-resolves react.
+          rm -rf node_modules apps/backend/node_modules apps/storefront/node_modules package-lock.json
+          node -e "const fs=require('fs');const p=require('./package.json');p.workspaces=['apps/backend'];p.overrides=Object.assign({},p.overrides,{react:'18.3.1','react-dom':'18.3.1'});fs.writeFileSync('package.json',JSON.stringify(p,null,2))"
           npm install --no-audit --no-fund
           echo "root react = $(node -p "require('./node_modules/react/package.json').version" 2>/dev/null || echo '?')"
+          echo "react copies found:"; find . -path '*/node_modules/react/package.json' -not -path '*/.medusa/*' 2>/dev/null || true
           cd apps/backend
           npm i playwright@latest --no-save
           npx medusa build

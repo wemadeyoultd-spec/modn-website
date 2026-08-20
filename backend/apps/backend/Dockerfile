@@ -24,15 +24,17 @@ COPY apps/backend/package.json ./apps/backend/package.json
 # by the reconciler and the admin crashes at runtime ("Objects are not valid as
 # a React child") — /app returns its HTML shell (HTTP 200) but renders blank.
 #
-# Restrict the workspace install to apps/backend and re-resolve from scratch so
-# ONLY a single react@18 is present when `medusa build` bundles the admin. A
-# root `overrides` pin was tried first and did NOT work (npm keeps the locked
-# react@19), so the storefront is excluded from the install entirely. The
-# committed repo and the Vercel storefront build are untouched (storefront keeps
-# React 19). The later `COPY . .` restores the original manifests, but the
-# backend-only node_modules is already resolved and `medusa build` does not
-# reinstall.
-RUN node -e "const fs=require('fs');const p=require('./package.json');p.workspaces=['apps/backend'];fs.writeFileSync('package.json',JSON.stringify(p,null,2))" \
+# Two belt-and-braces measures, applied to a CLEAN install (node_modules starts
+# empty in this layer, and the lockfile is dropped so npm fully re-resolves):
+#   1. Restrict the workspace list to apps/backend so the storefront's react@19
+#      is never even fetched.
+#   2. Add an `overrides` pin forcing react/react-dom to 18.3.1, so the resolved
+#      tree is guaranteed to contain exactly one react@18 regardless of npm's
+#      hoisting choices.
+# The later `COPY . .` restores the original manifests, but node_modules is
+# already resolved and `medusa build` does not reinstall. The final line prints
+# the resolved react version into the build log as proof.
+RUN node -e "const fs=require('fs');const p=require('./package.json');p.workspaces=['apps/backend'];p.overrides=Object.assign({},p.overrides,{react:'18.3.1','react-dom':'18.3.1'});fs.writeFileSync('package.json',JSON.stringify(p,null,2))" \
  && rm -f package-lock.json \
  && npm install --no-audit --no-fund \
  && node -e "console.log('resolved root react =', require('react/package.json').version)"

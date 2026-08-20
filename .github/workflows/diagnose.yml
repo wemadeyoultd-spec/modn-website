@@ -371,7 +371,7 @@ jobs:
   # prove whether that custom code is the cause of the React render crash.
   # ---------------------------------------------------------------------------
   render-repro:
-    name: Offline admin render repro + bisect
+    name: Offline admin render repro (before/after fix)
     if: ${{ github.event.inputs.repro_admin == 'true' }}
     runs-on: ubuntu-latest
     steps:
@@ -383,7 +383,7 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install deps
+      - name: Install deps (as the Docker build does: react@19 hoisted)
         working-directory: backend
         run: npm ci
 
@@ -393,9 +393,13 @@ jobs:
           npm i playwright@latest --no-save
           npx playwright install --with-deps chromium
 
-      - name: Write shared render-check script
+      # Scripts live in backend/apps/backend so `import 'playwright'` resolves
+      # from that package's node_modules (Node ESM resolves bare specifiers from
+      # the importing file's location, not the cwd).
+      - name: Write render-check + serve scripts
+        working-directory: backend/apps/backend
         run: |
-          cat > /tmp/render-check.mjs <<'EOF'
+          cat > render-check.mjs <<'EOF'
           import { chromium } from 'playwright';
           const URL = process.argv[2];
           const LABEL = process.argv[3] || 'check';
@@ -421,19 +425,15 @@ jobs:
           console.log(`[${LABEL}] BODY_LEN=${bodyText.length} PROBE=${JSON.stringify(probe)}`);
           console.log(`[${LABEL}] VERDICT=${rendered ? 'RENDERED_LOGIN' : 'BLANK_OR_NO_LOGIN'}`);
           console.log(`[${LABEL}] BODY_TEXT(0..200)=${bodyText.slice(0,200).replace(/\n/g,' ')}`);
-          console.log(`[${LABEL}] PAGE_ERRORS(${pageErrors.length}):`);
-          pageErrors.forEach(m => console.log('  ' + m.split('\n')[0]));
           const reactChild = [...consoleMsgs, ...pageErrors].some(m => /not valid as a React child/.test(m));
           console.log(`[${LABEL}] REACT_CHILD_ERROR=${reactChild}`);
+          console.log(`[${LABEL}] PAGE_ERRORS(${pageErrors.length}):`);
+          pageErrors.forEach(m => console.log('  ' + m.split('\n')[0]));
           console.log(`[${LABEL}] CONSOLE_ERRORS:`);
           consoleMsgs.filter(m => m.startsWith('[error]')).forEach(m => console.log('  ' + m.split('\n')[0]));
           await browser.close();
           EOF
-          echo "wrote /tmp/render-check.mjs"
-
-      - name: Serve helper
-        run: |
-          cat > /tmp/serve.mjs <<'EOF'
+          cat > serve.mjs <<'EOF'
           import http from 'http';
           import { readFile, stat } from 'fs/promises';
           import { extname, join, normalize } from 'path';
@@ -453,28 +453,34 @@ jobs:
             } catch { res.writeHead(404); res.end('nf'); }
           }).listen(PORT, () => console.log('serving', ROOT, 'on', PORT));
           EOF
-          echo "wrote /tmp/serve.mjs"
+          echo "scripts written"
 
-      - name: Build A (current source) + render test
+      - name: CONTROL — current install (react@19 hoisted) reproduces blank /app
         working-directory: backend/apps/backend
         run: |
           set -uo pipefail
+          echo "root react = $(node -p "require('../../node_modules/react/package.json').version" 2>/dev/null || echo '?')"
           npx medusa build
-          rm -rf /tmp/adminA && cp -r .medusa/server/public/admin /tmp/adminA
-          node /tmp/serve.mjs /tmp/adminA 8081 &
+          rm -rf /tmp/adminCtl && cp -r .medusa/server/public/admin /tmp/adminCtl
+          node serve.mjs /tmp/adminCtl 8081 &
           sleep 2
-          node /tmp/render-check.mjs "http://localhost:8081/app" A || true
+          node render-check.mjs "http://localhost:8081/app" CONTROL || true
 
-      - name: Build B (custom admin extensions removed) + render test
-        working-directory: backend/apps/backend
+      - name: FIX — pin react/react-dom to 18.3.1 (as Dockerfile does) renders login
+        working-directory: backend
         run: |
           set -uo pipefail
-          rm -rf src/admin/widgets src/admin/i18n
+          npm pkg set overrides.react=18.3.1 overrides.react-dom=18.3.1
+          npm install --no-audit --no-fund
+          echo "root react = $(node -p "require('./node_modules/react/package.json').version" 2>/dev/null || echo '?')"
+          # medusa build's admin bundle must now contain a single react@18.
+          cd apps/backend
+          npm i playwright@latest --no-save
           npx medusa build
-          rm -rf /tmp/adminB && cp -r .medusa/server/public/admin /tmp/adminB
-          node /tmp/serve.mjs /tmp/adminB 8082 &
+          rm -rf /tmp/adminFix && cp -r .medusa/server/public/admin /tmp/adminFix
+          node serve.mjs /tmp/adminFix 8082 &
           sleep 2
-          node /tmp/render-check.mjs "http://localhost:8082/app" B || true
+          node render-check.mjs "http://localhost:8082/app" FIX || true
 
       - name: Upload repro screenshots
         if: always()

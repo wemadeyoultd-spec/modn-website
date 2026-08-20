@@ -17,7 +17,18 @@ COPY package.json package-lock.json turbo.json ./
 COPY apps/backend/package.json ./apps/backend/package.json
 COPY apps/storefront/package.json ./apps/storefront/package.json
 
-RUN npm ci
+# The storefront (Next.js 15) depends on react@19, which npm hoists to the root
+# node_modules of this workspace install. The Medusa admin dashboard renders
+# with react@18. React 19 changed the internal element `$$typeof` symbol, so the
+# admin's React-18 elements are seen as plain objects by the reconciler and the
+# admin crashes at runtime with "Objects are not valid as a React child",
+# leaving /app blank (HTTP 200 shell, nothing rendered). This image only builds
+# and runs the BACKEND (the storefront is deployed separately on Vercel), so pin
+# react/react-dom to 18.3.1 for the image install. That guarantees a single
+# React 18 in the admin bundle. The committed repo and the Vercel storefront
+# build are untouched, so the storefront keeps React 19.
+RUN npm pkg set overrides.react=18.3.1 overrides.react-dom=18.3.1 \
+ && npm install --no-audit --no-fund
 
 # Copy the rest of the source and build the backend (compiles server + admin
 # into apps/backend/.medusa/server).

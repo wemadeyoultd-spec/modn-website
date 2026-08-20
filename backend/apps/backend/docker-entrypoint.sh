@@ -112,6 +112,20 @@ fi
 # step is non-fatal (guarded) so a single failing script cannot restart-loop
 # the container.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Optional one-time admin password set. When SET_ADMIN=true, create or reset the
+# admin user (ADMIN_EMAIL / ADMIN_PASSWORD) in-container via Medusa so the
+# password is hashed correctly (raw SQL cannot do this). Runs synchronously
+# before the server starts; failures are non-fatal so they never crash-loop the
+# container. Set SET_ADMIN=false again after a successful run.
+# ---------------------------------------------------------------------------
+if [ "$SET_ADMIN" = "true" ]; then
+  echo "[entrypoint] SET_ADMIN=true — setting admin password for ${ADMIN_EMAIL:-admin@medusa.local}..."
+  npx medusa exec ./src/scripts/set-admin.ts \
+    && echo "[entrypoint] SET_ADMIN COMPLETE. IMPORTANT: re-deploy with SET_ADMIN=false." \
+    || echo "[entrypoint] SET_ADMIN FAILED (see error above)."
+fi
+
 run_seeds() {
   echo "[entrypoint][seed] RUN_SEED=true — seeding store data (one-time, background)..."
   npx medusa exec ./src/migration-scripts/initial-data-seed.ts || echo "[entrypoint][seed] initial-data-seed FAILED"

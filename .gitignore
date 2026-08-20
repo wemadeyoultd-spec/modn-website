@@ -33,6 +33,9 @@ out/
 dump.rdb
 *.rdb
 
+# Local admin-screenshot viewer artifacts (not for repo storage)
+docs/admin-screenshots/*.html
+
 # Test coverage
 coverage/
 

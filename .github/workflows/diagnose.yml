@@ -254,3 +254,103 @@ jobs:
             echo "- Backend latest deployment status: ${{ steps.railway.outputs.backend_status }}"
             echo "- See step logs above for /health, /app, Vercel production, and ${PUBLIC_DOMAIN} results."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # BROWSER RENDER CHECK: prove whether the admin SPA at /app actually renders
+  # in a real headless Chromium (HTTP 200 only means the HTML shell loaded).
+  # Extracts + probes the referenced admin assets for 404s, then loads the page
+  # and collects console messages, page errors and failed requests — the real
+  # signal for a blank admin. Runs independently so it always executes.
+  # ---------------------------------------------------------------------------
+  browser-check:
+    name: Browser render check (/app)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Fetch /app HTML and probe referenced assets
+        run: |
+          set -uo pipefail
+          BASE="https://backend-production-93dc.up.railway.app"
+          echo "== GET $BASE/app =="
+          curl -sSL -m 30 "$BASE/app" -o app.html -w 'HTTP %{http_code}  size=%{size_download}\n' || echo "curl failed"
+          echo "----- app.html -----"
+          cat app.html; echo ""
+          echo "----- referenced <script src> / <link href> assets -----"
+          grep -oE '(src|href)="[^"]+"' app.html \
+            | sed -E 's/^(src|href)="//; s/"$//' | sort -u > assets.txt
+          cat assets.txt
+          echo "----- asset HTTP status (find 404s) -----"
+          while read -r a; do
+            [ -z "$a" ] && continue
+            case "$a" in
+              http*) URL="$a";;
+              /*)    URL="$BASE$a";;
+              *)     URL="$BASE/app/$a";;
+            esac
+            CT="$(curl -s -m 25 -o /dev/null -w '%{http_code} %{content_type}' "$URL" || echo '000 -')"
+            echo "  $CT  $URL"
+          done < assets.txt
+
+      - name: Playwright headless render check
+        run: |
+          set -uo pipefail
+          npm init -y >/dev/null 2>&1 || true
+          npm i -D playwright@latest >/dev/null 2>&1
+          npx playwright install --with-deps chromium
+          cat > check.mjs <<'EOF'
+          import { chromium } from 'playwright';
+          const BASE = 'https://backend-production-93dc.up.railway.app';
+          const consoleMsgs = [], pageErrors = [], failed = [];
+          const browser = await chromium.launch();
+          const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+          page.on('console', m => consoleMsgs.push(`[${m.type()}] ${m.text()}`));
+          page.on('pageerror', e => pageErrors.push(String(e && e.stack || e)));
+          page.on('requestfailed', r => failed.push(`REQFAIL ${r.failure()?.errorText || ''} ${r.url()}`));
+          page.on('response', r => { if (r.status() >= 400) failed.push(`HTTP ${r.status()} ${r.url()}`); });
+          try {
+            await page.goto(BASE + '/app', { waitUntil: 'networkidle', timeout: 60000 });
+          } catch (e) { pageErrors.push('goto: ' + String(e)); }
+          await page.waitForTimeout(9000);
+          const finalUrl = page.url();
+          const bodyText = await page.evaluate(() => document.body ? document.body.innerText : '(no body)');
+          const probe = await page.evaluate(() => ({
+            emailInputs: document.querySelectorAll('input[type=email],input[name=email]').length,
+            passwordInputs: document.querySelectorAll('input[type=password],input[name=password]').length,
+            totalInputs: document.querySelectorAll('input').length,
+            buttons: document.querySelectorAll('button').length,
+            rootChildren: (document.getElementById('medusa') || document.querySelector('#root') || document.body).children.length,
+            title: document.title,
+          }));
+          await page.screenshot({ path: 'admin.jpg', type: 'jpeg', quality: 55 });
+          console.log('=== FINAL URL ===', finalUrl);
+          console.log('=== TITLE ===', probe.title);
+          console.log('=== BODY INNERTEXT LENGTH ===', bodyText.length);
+          console.log('=== BODY INNERTEXT (first 600) ===\n' + bodyText.slice(0, 600));
+          console.log('=== DOM PROBE ===', JSON.stringify(probe));
+          const rendered = probe.emailInputs > 0 && probe.passwordInputs > 0 && bodyText.length > 20;
+          console.log('=== RENDER VERDICT ===', rendered ? 'LOGIN_FORM_RENDERED' : 'BLANK_OR_NO_LOGIN');
+          console.log('=== CONSOLE MESSAGES (' + consoleMsgs.length + ') ===');
+          consoleMsgs.forEach(m => console.log(m));
+          console.log('=== PAGE ERRORS (' + pageErrors.length + ') ===');
+          pageErrors.forEach(m => console.log(m));
+          console.log('=== FAILED / 4xx-5xx REQUESTS ===');
+          [...new Set(failed)].forEach(m => console.log(m));
+          await browser.close();
+          EOF
+          node check.mjs
+          echo "=====SCREENSHOT_B64_START====="
+          base64 -w0 admin.jpg
+          echo ""
+          echo "=====SCREENSHOT_B64_END====="
+
+      - name: Upload screenshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-screenshot
+          path: admin.jpg
+          if-no-files-found: warn
